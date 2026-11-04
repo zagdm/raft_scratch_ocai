@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <conversionRule conversionWord="clr" converterClass="org.springframework.boot.logging.logback.ColorConverter" />
+    <conversionRule conversionWord="wex" converterClass="org.springframework.boot.logging.logback.WhitespaceThrowableProxyConverter" />
+    <conversionRule conversionWord="wEx" converterClass="org.springframework.boot.logging.logback.ExtendedWhitespaceThrowableProxyConverter" />
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%clr(%d{HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%X{nodeId:-?}]){cyan} %clr(T%X{term:-0}){magenta} %clr(%-9X{role:-?}){yellow} %clr(%-28.28logger{28}){cyan} - %msg%n%wEx</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+
+    <logger name="com.myraft" level="INFO" />
+    <logger name="com.myraft.raft.rpc.RaftRpcClient" level="WARN" />
+    <logger name="com.myraft.raft.timer.ElectionTimer" level="WARN" />
+    <logger name="com.myraft.api.StatusController" level="WARN" />
+</configuration>

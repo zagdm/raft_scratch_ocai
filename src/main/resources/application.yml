@@ -1,0 +1,12 @@
+server:
+  port: 8080
+
+raft:
+  node-id: node-1
+  election-timeout-min-ms: 5000
+  election-timeout-max-ms: 8000
+  heartbeat-interval-ms: 1000
+  storage-path: data/raft-state.json
+
+cluster:
+  peers: []
