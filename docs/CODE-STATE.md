@@ -1,22 +1,24 @@
 # Состояние кода my-raft
 
-Снимок на **2026-10-28**. Описывает реализацию классов, логику Raft, персистентность, RPC, таймеры и известные проблемы именно в коде.
+Актуальный снимок реализации классов, логики Raft, персистентности, RPC, таймеров и оставшихся ограничений.
 
 ## Стек
 - Java 21, Spring Boot 3.3.5, Maven
-- Зависимости: spring-boot-starter-web, spring-boot-configuration-processor, spring-boot-starter-test
-- Артефакт: `com.myraft:my-raft:0.0.1-SNAPSHOT` (jar в `target/`)
+- Зависимости: `spring-boot-starter-web`, `spring-boot-configuration-processor`, `spring-boot-starter-test`
+- Артефакт: `com.myraft:my-raft:0.0.1-SNAPSHOT`
 
 ## Структура пакетов
 ```
 src/main/java/com/myraft/
   MyRaftApplication.java
-  api/StatusController.java, api/dto/StatusResponse.java
-  config/RaftProperties.java, config/ClusterProperties.java, config/RestTemplateConfig.java
+  api/StatusController.java
+  api/dto/StatusResponse.java
+  config/RaftProperties.java, ClusterProperties.java, RestTemplateConfig.java
   raft/RaftNode.java
-  raft/model/NodeRole.java, raft/model/RaftState.java
-  raft/rpc/RaftRpcController.java, raft/rpc/RaftRpcService.java, raft/rpc/RaftRpcClient.java, raft/rpc/dto/*
-  raft/storage/RaftStorage.java, raft/storage/FileRaftStorage.java, raft/storage/PersistedState.java
+  raft/model/NodeRole.java, RaftState.java
+  raft/rpc/RaftRpcController.java, RaftRpcService.java, RaftRpcClient.java
+  raft/rpc/dto/RequestVoteRequest.java, RequestVoteResponse.java, AppendEntriesRequest.java, AppendEntriesResponse.java
+  raft/storage/RaftStorage.java, FileRaftStorage.java, InMemoryRaftStorage.java, PersistedState.java
   raft/timer/ElectionTimer.java
 src/main/resources/
   application.yml, logback-spring.xml
@@ -24,56 +26,65 @@ src/test/java/com/myraft/
   api/dto/StatusResponseJsonTest.java
   raft/RaftElectionTest.java
   raft/RaftNodeElectionTest.java
+  raft/RaftStateAtomicityTest.java
+  raft/rpc/RaftRpcServiceAtomicityTest.java
   raft/storage/FileRaftStorageTest.java
   raft/storage/InMemoryRaftStorage.java
 ```
 
-## Ключевые классы
+## Конфигурация
+- `RaftProperties` (`raft`): `nodeId`, `electionTimeoutMinMs`, `electionTimeoutMaxMs`, `heartbeatIntervalMs`, `storagePath`.
+- `application.yml` (текущие значения): `electionTimeoutMinMs=5000`, `electionTimeoutMaxMs=8000`, `heartbeatIntervalMs=1000`, `storagePath=data/raft-state.json`.
+- `ClusterProperties` (`cluster`): `peers` (пустые/blank значения фильтруются).
+- `RestTemplateConfig`: connect/read timeout `200ms`.
+- `logback-spring.xml`: консольный вывод с MDC `[node:..][term:..][role:..]`.
 
-### Конфигурация
-- `RaftProperties` (prefix `raft`): `nodeId`, `electionTimeoutMinMs`, `electionTimeoutMaxMs`, `heartbeatIntervalMs`, `storagePath`. Текущие значения: 5000/8000/1000.
-- `ClusterProperties` (prefix `cluster`): `peers` с фильтрацией пустых/blank значений.
-- `RestTemplateConfig`: `connectTimeout/readTimeout = 200ms` (ранее 1000).
-- `logback-spring.xml`: консольный вывод с MDC `[node:..][term:..][role:..]`, INFO по умолчанию.
-
-### Состояние
+## Состояние и хранение
 - `NodeRole`: `FOLLOWER`, `CANDIDATE`, `LEADER`.
-- `PersistedState` (record): `term`, `votedFor`. `EMPTY=(0,null)`. Сохраняются только `term`/`votedFor` (role/leaderId не персистятся).
-- `RaftState`: хранит `currentTerm`, `votedFor`, `role`, `leaderId`, `startTime`. При конструировании грузит из `RaftStorage`. `updateTermAndVote(term,votedFor)` — единственный путь изменения term/vote: сначала `storage.persist()`, потом обновление полей в памяти. Защита `ReentrantReadWriteLock`. Доступ к локу через `getLock()` (опасный паттерн).
+- `PersistedState(term, votedFor)`, `EMPTY=(0,null)` — персистятся только `currentTerm` и `votedFor`.
+- `RaftState` хранит `currentTerm`, `votedFor`, `role`, `leaderId`, `startTime`; загружает персистентное состояние из `RaftStorage` при создании. Защита через `ReentrantReadWriteLock`.
+- Атомарные операции term/vote (persist-before-visible, под write-lock):
+  - `startElection(String selfId)` — инкрементирует терм, голосует за себя, возвращает новый терм.
+  - `grantVote(int candidateTerm, String candidateId)` → `GrantVoteResult(granted, termIncreased, term)` — атомарно решает выдачу голоса (не более одного голоса в терме).
+  - `updateTermAndVote(int term, String votedFor)` — монотонный (no-op при `term < currentTerm`, `votedFor` не меняется при откате).
+- `RaftStorage` (`load/persist`), реализации:
+  - `FileRaftStorage` (`raft.storage.type=file`, `matchIfMissing=true`): запись через temp-файл + `fsync` + atomic move/fallback, при ошибке чтения бросает `IllegalStateException`.
+  - `InMemoryRaftStorage` (`raft.storage.type=memory`): хранение в памяти, используется для неперсистентного режима.
 
-### Хранение
-- `RaftStorage`: контракт `load()`/`persist(term,votedFor)`.
-- `FileRaftStorage`: запись во временный файл в той же директории, `FileChannel.force(true)`, `ATOMIC_MOVE` с fallback на `REPLACE_EXISTING`. Каталоги создаются при необходимости. При отсутствии файла — `EMPTY`. При ошибке чтения — `IllegalStateException` (запрет тихого старта с term=0).
-- `InMemoryRaftStorage`: тестовая реализация.
+## RPC и протокол (election-only)
+- DTO: `RequestVoteRequest/Response`, `AppendEntriesRequest/Response` (журнал не передаётся, `entries` пустые для heartbeat).
+- `RaftRpcController`: `POST /raft/requestVote`, `POST /raft/appendEntries`.
+- `RaftRpcClient`: отправка через `RestTemplate` в `CompletableFuture.supplyAsync()`, при ошибке возвращает `null`.
+- `RaftRpcService`:
+  - `handleRequestVote`: решение по голосу через `raftState.grantVote(...)`; side-effects (`FOLLOWER`, `leaderId=null`, `electionTimer.reset()`, логи) выполняются по результату.
+  - `handleAppendEntries`: stale term отклоняется без изменения `votedFor`; более высокий терм — монотонное обновление; при валидном heartbeat узел становится/остаётся `FOLLOWER`, обновляет лидера и сбрасывает таймер выборов.
+  - Логируются получение/отправка `RequestVote`/`AppendEntries` и ответы.
 
-### RPC
-- DTO: `RequestVoteRequest/Response`, `AppendEntriesRequest/Response` (журнал не передаётся).
-- `RaftRpcController`: `POST /raft/requestVote`, `POST /raft/appendEntries` → `RaftRpcService`.
-- `RaftRpcClient`: отправка через `CompletableFuture.supplyAsync()` с `RestTemplate`. При ошибке логирует DEBUG и возвращает `null`. `getPeers()` из `ClusterProperties`.
-- `RaftRpcService`: обработка голосований/heartbeat. При `term > currentTerm` — шаг вниз, сброс голоса, `FOLLOWER`. При получении heartbeat не в FOLLOWER — переход в FOLLOWER, обновление leaderId, сброс таймера. `raft.leader.discovered` только при смене лидера, heartbeat в DEBUG. При голосовании за кандидата — персист голоса и сброс таймера выборов.
+## Ядро узла и таймеры
+- `ElectionTimer`: однопоточный `ScheduledExecutorService` с `epoch` + синхронизацией, отбрасывает устаревшие таймауты; случайный таймаут в `[min,max]`.
+- `RaftNode`:
+  - Старт в `FOLLOWER`, запуск election timer.
+  - `startElection()` вызывает `raftState.startElection(nodeId)`, переходит в `CANDIDATE`, работает с возвращённым термом, голосует за себя, рассылает `RequestVote`.
+  - При кворуме становится `LEADER`, запускает периодические пустые `AppendEntries` (heartbeat scheduler).
+  - Ответы с более высоким термом приводят к шагу вниз (`FOLLOWER`, сброс leaderId/heartbeat/timer).
 
-### Ядро Raft
-- `ElectionTimer`: однопоточный `ScheduledExecutorService` `raft-election-timer`. Случайный таймаут в [min,max]. **Обновлён**: синхронизация через `synchronized(lock)`, `epoch` + `currentEpoch`, проверка поколения в `onTimeout()` для отбраковки устаревших лямбд, `timeoutCallback` `volatile`, `stop()` инкрементирует epoch. При колбэке лидера просто делает `reset()`.
-- `RaftNode`: оркестратор. Старт — `FOLLOWER`, запуск таймера. По таймауту (если не лидер) — `startElection()`: `term++`, `updateTermAndVote(self,null)`? нет, `updateTermAndVote(newTerm, selfId)`, роль `CANDIDATE`, сброс таймера, голоса = 1, проверка кворума до рассылки, рассылка RequestVote асинхронно. При получении большинства голосов — `becomeLeader()` (только из CANDIDATE) → `LEADER`, `leaderId=self`, запуск heartbeats. Heartbeats через `raft-heartbeat` `ScheduledExecutorService`, фиксированный интервал 100мс, пустые AppendEntries. При ответе с бóльшим term — шаг вниз.
+## API
+- `GET /status` (`StatusController`) возвращает `nodeId`, `role`, `currentTerm`, `leaderId`, `peers`, `uptime`, `isLeader` (сериализация поля `isLeader`).
 
-### API
-- `StatusController`: `GET /status` — собирает данные из RaftState/RaftProperties/RaftRpcClient, считает uptime, логирует, обновляет/очищает MDC.
-- `StatusResponse`: поля nodeId/role/currentTerm/leaderId/peers/isLeader/uptime. `isLeader` сериализуется как `isLeader` через `@JsonProperty` на геттере/сеттере.
+## Тесты (`src/test`)
+`mvn test`: **13 тестов, BUILD SUCCESS**.
+- `StatusResponseJsonTest` (1)
+- `RaftElectionTest` (3)
+- `RaftNodeElectionTest` (1)
+- `RaftStateAtomicityTest` (3) — монотонность `updateTermAndVote`, `startElection`, конкурентный `grantVote`
+- `raft.rpc.RaftRpcServiceAtomicityTest` (3) — конкурентные `RequestVote`, сценарий без отката терма, stale `AppendEntries` не меняет `votedFor`
+- `FileRaftStorageTest` (2)
 
-## Модульные/юнит-тесты (src/test)
-7 тестов, проходят (`mvn test` BUILD SUCCESS):
-- `StatusResponseJsonTest.leaderFlagIsSerializedAsIsLeader`
-- `RaftElectionTest` (3): followerInitialState, termAndVoteArePersisted, stateIsRestoredFromStorage
-- `RaftNodeElectionTest.singleNodeBecomesLeaderWithoutPeers`
-- `FileRaftStorageTest` (2): persistsAndReloadsState, overwritesPreviousState
-- `InMemoryRaftStorage` — тестовый двойник
-
-## Известные проблемы в коде
-1. **ElectionTimer/gонки** (частично исправлено): добавлены синхронизация + epoch, но архитектура всё ещё чувствительна к таймингу; "старые" таймауты отбраковываются по поколению.
-2. **Соотношение таймаутов**: снижены RPC-таймауты до 200мс, увеличены election timeout до 500-800мс, heartbeat до 100мс — уменьшает риск "запоздалых" ответов, но не устраняет все гонки.
-3. **Отсутствие pre-vote** — узел при старте/сетевых событиях может агрессивно повышать term.
-4. **Только term/votedFor персистятся** — роль/лидер теряются при рестарте.
-5. **Нет репликации лога**: AppendEntries пустые, нет log/commitIndex/lastApplied.
-6. **Синхронизация точечная**: часть синхронизации в RaftNode, `getLock()` у RaftState доступен извне (потенциальный риск инкапсуляции).
-7. **Планировщики**: два однопоточных ScheduledExecutorService (election/heartbeat), нет централизованного управления.
-8. **@EnableScheduling** включён, но прямых `@Scheduled` нет.
+## Оставшиеся ограничения/проблемы
+1. **Нет репликации лога и FSM:** отсутствуют `log[]`, `prevLogIndex/prevLogTerm`, `entries` с данными, `commitIndex`/`lastApplied`, применение команд, снапшоты.
+2. **Нет pre-vote:** таймаут выборов сразу увеличивает терм.
+3. **Персистентность неполная:** сохраняются только `currentTerm`/`votedFor`; роль и `leaderId` не восстанавливаются.
+4. **Проверки up-to-date log не реализованы:** нет сравнения `lastLogIndex/lastLogTerm` (неактуально до появления лога, но требуется для полноценного Raft).
+5. **`AppendEntries` всегда `success=true` при допустимом терме:** нет проверки согласованности лога.
+6. **Синхронизация распределена по компонентам:** term/vote атомарны, но смена роли/лидера и часть побочных эффектов выполняются отдельными шагами; `getLock()` остаётся доступным.
+7. **RPC/тайминги эвристические:** фиксированные таймауты, обработка ошибок как `null`, отсутствие полноценной политики retry/backoff и лимитов исполнения.

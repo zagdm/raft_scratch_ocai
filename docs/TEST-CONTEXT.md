@@ -1,39 +1,34 @@
 # Контекст тестирования my-raft
 
-Дата актуализации: 2026-10-30
-Окружение: Windows 10 (WSL2 Ubuntu 22.04), Java 21.0.5, Maven из IntelliJ 2025.2.4, запуск через .cmd скрипты
+Актуально для текущего состояния проекта (election-only Raft, Java 21 / Spring Boot 3.3.5, Windows `.cmd`-скрипты).
 
 ## Цель
-Проверка инфраструктуры запуска кластера: start-cluster = цикл start-node, работа из чужого cwd, корректный старт окна, отключение узла закрытием консольного окна, восстановление через start-node, корректность проверки портов/пиров.
+Проверка инфраструктуры запуска кластера: `start-cluster.cmd` = цикл `start-node.cmd`, работа из чужого `cwd`, корректный старт окна, отключение узла закрытием консольного окна, восстановление через `start-node.cmd`, корректность проверки портов/пиров.
 
 ## Конфигурация теста
 - Порты: 18080, 18081, 18082 (отдельные от 8080)
 - Кластер: 3 узла
-- DATA_DIR: data (по умолчанию)
-- Jar: target/my-raft-0.0.1-SNAPSHOT.jar
-- Способ запуска: cmd.exe из C:\temp (чужой cwd) с коротким/полным путём к скриптам
-- Отключение: CloseMainWindow() по PID процесса java с server.port=18081
-- Восстановление: start-node.cmd 2 3 18080 из C:\temp
+- `DATA_DIR`: `data` (по умолчанию)
+- JAR: `target/my-raft-*.jar` (актуальный собранный артефакт)
+- Способ запуска: из чужого `cwd` (например `C:\temp`) с вызовом скриптов из `scripts\runtime`
+- Отключение: закрытие консольного окна узла (`CloseMainWindow()` по PID `java.exe` с нужным `server.port`)
+- Восстановление: `scripts\runtime\start-node.cmd 2 3 18080` из чужого `cwd`
 
 ## Порядок проведения теста
 1. Предварительная очистка: остановить кластер `scripts\runtime\stop-cluster.cmd`, удалить папку `data/`, убедиться что порты 18080-18082 свободны.
 2. Пересборка артефакта: выполнить `scripts\runtime\build-jar.cmd` (обязательно после изменений в исходниках/конфигурации). Скрипты запуска не пересобирают существующий JAR в `target/`.
-3. Старт кластера из чужого cwd `C:\temp`: `scripts\runtime\start-cluster.cmd 3 18080` (или эквивалент через вызовы `start-node`).
-4. Дождаться выбора лидера, проверить статусы всех узлов через `/status`.
+3. Старт кластера из чужого `cwd` `C:\temp`: `scripts\runtime\start-cluster.cmd 3 18080`.
+4. Дождаться выбора лидера, проверить статусы всех узлов через `GET /status`.
 5. Отключить узел-2 закрытием его консольного окна (`CloseMainWindow()`).
-6. Проверить, что кластер продолжает работать с оставшимися узлами, произошёл перевыбор при необходимости.
-7. Восстановить узел-2 из чужого cwd `C:\temp`: `scripts\runtime\start-node.cmd 2 3 18080`.
-8. Дождаться синхронизации/перевыборов, проверить статусы всех трёх узлов - кластер должен быть полным.
+6. Проверить, что кластер продолжает работать с оставшимися узлами, при необходимости произошёл перевыбор.
+7. Восстановить узел-2 из чужого `cwd` `C:\temp`: `scripts\runtime\start-node.cmd 2 3 18080`.
+8. Дождаться стабилизации/перевыборов, проверить статусы всех трёх узлов — кластер должен быть полным.
 9. Завершение теста: остановить кластер `scripts\runtime\stop-cluster.cmd`, удалить `data/` и временные артефакты.
 
-## Таймауты (обновлено)
-- `election-timeout-min-ms`: 5000, `election-timeout-max-ms`: 8000
-- `heartbeat-interval-ms`: 1000 (раз в секунду)
-- Сетевые таймауты `RestTemplate` (connect/read): 200мс — не изменены
-- Лидер шлёт пустые `AppendEntries` (heartbeats) раз в 1000мс. Логи: `AppendEntries sent -> ... term=... entries=0`, `AppendEntries received <- ... term=... entries=0`, ответы `AppendEntries response ...`
-
-## Изменения окружения, влияющие на тест
-- ElectionTimer: добавлена синхронизация + epoch (отбраковка устаревших таймаутов)
-- RestTemplate: connect/read timeout 200мс (было 1000)
-- application.yml: election-timeout 500-800мс, heartbeat-interval 100мс (были 150-300/50)
-- RPC-таймауты снижены, heartbeat увеличен для большего зазора
+## Актуальные параметры и наблюдаемое поведение
+- `raft.election-timeout-min-ms`: 5000, `raft.election-timeout-max-ms`: 8000
+- `raft.heartbeat-interval-ms`: 1000 (лидер шлёт пустые `AppendEntries`/heartbeats раз в секунду)
+- Сетевые таймауты `RestTemplate` (connect/read): 200мс
+- Хранилище: `raft.storage.type=file` по умолчанию (`raft.storage-path`, обычно `data/node-N.json`), in-memory режим поддерживается через `-Draft.storage.type=memory`
+- Логи: консольный вывод с MDC `[node/term/role]`, видны события `RequestVote`/`AppendEntries` отправки, приёма и ответов (в т.ч. `AppendEntries ... entries=0`)
+- Текущая реализация election-only: атомарные переходы `currentTerm/votedFor` (`startElection`, `grantVote`, монотонный `updateTermAndVote`) предотвращают откат терма и двойное голосование в одном терме (F1/F2)

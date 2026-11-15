@@ -62,7 +62,7 @@ cmd.exe /c "cd /d C:\temp\myraft-build && \"C:\Program Files\JetBrains\IntelliJ 
 искажается, поэтому в командах используется короткий путь `C:\Users\BCC9~1\...`.
 Сам каталог проекта (`my-raft`) — ASCII, короткое имя не требуется.
 
-Git-репозитория нет: `git rev-parse` сообщает «not a git repository».
+Проект находится в git-репозитории (ветка `main`); удалённые операции выполняются только по явному запросу.
 
 ## 5. Каталоги, создаваемые при работе
 
@@ -115,7 +115,7 @@ Git-репозитория нет: `git rev-parse` сообщает «not a git 
 | `mvn` | только внутри IntelliJ (3.9.9) | в PATH нет |
 | `powershell` | Windows | используется для HTTP-проверок и закрытия окон |
 | `curl` | WSL `/usr/bin/curl` | есть, но проверки идут через PowerShell |
-| `git` | WSL `/usr/bin/git` | проект не под git |
+| `git` | WSL `/usr/bin/git` | репозиторий проекта инициализирован (локально/remote используются по запросу) |
 | `iconv` | WSL | чтение вывода cp866 |
 | JDK/Maven в WSL | отсутствуют | сборка только на Windows |
 
@@ -170,11 +170,11 @@ robocopy "C:\Users\BCC9~1\IdeaProjects\my-raft" C:\temp\myraft-build /MIR /XD ta
 ... mvn.cmd clean package -DskipTests
 
 # 3. Запуск кластера (из любого каталога Windows)
-C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\start-cluster.cmd 3 18080
+C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\runtime\start-cluster.cmd 3 18080
 
 # 4. Возврат одной ноды после закрытия её окна
-C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\start-node.cmd 2 3 18080
+C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\runtime\start-node.cmd 2 3 18080
 
 # 5. Остановка всего
-C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\stop-cluster.cmd
+C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\runtime\stop-cluster.cmd
 ```
