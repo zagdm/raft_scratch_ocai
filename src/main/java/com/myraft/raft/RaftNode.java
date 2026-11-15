@@ -76,8 +76,7 @@ public class RaftNode {
     private void startElection() {
         updateMdc();
         try {
-            int newTerm = raftState.getCurrentTerm() + 1;
-            raftState.updateTermAndVote(newTerm, raftProperties.getNodeId());
+            int newTerm = raftState.startElection(raftProperties.getNodeId());
             raftState.setRole(NodeRole.CANDIDATE);
             raftState.setLeaderId(null);
             updateMdc();
@@ -94,7 +93,7 @@ public class RaftNode {
             maybeBecomeLeader(votes, majority);
 
             for (String peer : peers) {
-                RequestVoteRequest req = new RequestVoteRequest(raftState.getCurrentTerm(), raftProperties.getNodeId());
+                RequestVoteRequest req = new RequestVoteRequest(newTerm, raftProperties.getNodeId());
                 rpcClient.requestVote(peer, req).thenAccept(resp -> {
                     if (resp == null) {
                         return;

@@ -32,39 +32,29 @@ public class RaftRpcService {
         updateMdc();
         try {
             log.debug("RequestVote received <- {} term={}", request.getCandidateId(), request.getTerm());
-            int currentTerm = raftState.getCurrentTerm();
-            if (request.getTerm() < currentTerm) {
-                log.debug("vote rejected (stale term, incoming RequestVote) from={} theirTerm={} term={}",
-                        request.getCandidateId(), request.getTerm(), currentTerm);
-                log.debug("RequestVote response sent -> {} term={} granted=false", request.getCandidateId(), currentTerm);
-                return new RequestVoteResponse(currentTerm, false);
-            }
-            if (request.getTerm() > currentTerm) {
+            RaftState.GrantVoteResult result = raftState.grantVote(request.getTerm(), request.getCandidateId());
+            if (result.termIncreased()) {
                 log.info("stepping down (incoming RequestVote has higher term) newTerm={} from={}",
                         request.getTerm(), request.getCandidateId());
-                raftState.updateTermAndVote(request.getTerm(), null);
                 raftState.setRole(NodeRole.FOLLOWER);
                 raftState.setLeaderId(null);
                 updateMdc();
                 electionTimer.reset();
             }
-            currentTerm = raftState.getCurrentTerm();
-            if (request.getTerm() == currentTerm) {
-                String votedFor = raftState.getVotedFor();
-                if (votedFor == null || votedFor.equals(request.getCandidateId())) {
-                    raftState.updateTermAndVote(currentTerm, request.getCandidateId());
-                    electionTimer.reset();
-                    log.debug("vote granted (to candidate) {} term={}", request.getCandidateId(), currentTerm);
-                    log.debug("RequestVote response sent -> {} term={} granted=true", request.getCandidateId(), currentTerm);
-                    return new RequestVoteResponse(currentTerm, true);
-                } else {
-                    log.debug("vote rejected (already voted / condition failed) to {} (votedFor={})", request.getCandidateId(), votedFor);
-                    log.debug("RequestVote response sent -> {} term={} granted=false", request.getCandidateId(), currentTerm);
-                    return new RequestVoteResponse(currentTerm, false);
-                }
+            if (result.granted()) {
+                electionTimer.reset();
+                log.debug("vote granted (to candidate) {} term={}", request.getCandidateId(), result.term());
+                log.debug("RequestVote response sent -> {} term={} granted=true", request.getCandidateId(), result.term());
+                return new RequestVoteResponse(result.term(), true);
             }
-            log.debug("RequestVote response sent -> {} term={} granted=false", request.getCandidateId(), raftState.getCurrentTerm());
-            return new RequestVoteResponse(raftState.getCurrentTerm(), false);
+            if (request.getTerm() < result.term()) {
+                log.debug("vote rejected (stale term, incoming RequestVote) from={} theirTerm={} term={}",
+                        request.getCandidateId(), request.getTerm(), result.term());
+            } else {
+                log.debug("vote rejected (already voted / condition failed) to {} term={}", request.getCandidateId(), result.term());
+            }
+            log.debug("RequestVote response sent -> {} term={} granted=false", request.getCandidateId(), result.term());
+            return new RequestVoteResponse(result.term(), false);
         } finally {
             clearMdc();
         }

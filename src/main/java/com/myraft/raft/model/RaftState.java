@@ -42,16 +42,65 @@ public class RaftState {
         }
     }
 
+    public record GrantVoteResult(boolean granted, boolean termIncreased, int term) {}
+
+    /**
+     * Атомарно начинает выборы: инкрементирует терм и голосует за себя.
+     * Сначала состояние фиксируется в хранилище, и только потом становится видимым.
+     */
+    public int startElection(String selfId) {
+        lock.writeLock().lock();
+        try {
+            int newTerm = currentTerm + 1;
+            storage.persist(newTerm, selfId);
+            this.currentTerm = newTerm;
+            this.votedFor = selfId;
+            return newTerm;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Атомарно решает, можно ли выдать голос кандидату, с соблюдением монотонности терма.
+     */
+    public GrantVoteResult grantVote(int candidateTerm, String candidateId) {
+        lock.writeLock().lock();
+        try {
+            if (candidateTerm < currentTerm) {
+                return new GrantVoteResult(false, false, currentTerm);
+            }
+            if (candidateTerm > currentTerm) {
+                storage.persist(candidateTerm, candidateId);
+                this.currentTerm = candidateTerm;
+                this.votedFor = candidateId;
+                return new GrantVoteResult(true, true, currentTerm);
+            }
+            if (votedFor == null || votedFor.equals(candidateId)) {
+                storage.persist(currentTerm, candidateId);
+                this.votedFor = candidateId;
+                return new GrantVoteResult(true, false, currentTerm);
+            }
+            return new GrantVoteResult(false, false, currentTerm);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
     /**
      * Единственный способ изменить {@code currentTerm}/{@code votedFor}.
      * <p>
      * Сначала состояние фиксируется в хранилище, и только потом становится видимым.
      * Если запись не удалась, состояние не меняется и исключение уходит наверх:
      * узел не должен ни голосовать, ни отвечать, пока состояние не на диске.
+     * Монотонно: терм меньше текущего игнорируется (no-op).
      */
     public void updateTermAndVote(int term, String votedFor) {
         lock.writeLock().lock();
         try {
+            if (term < currentTerm) {
+                return;
+            }
             storage.persist(term, votedFor);
             this.currentTerm = term;
             this.votedFor = votedFor;
