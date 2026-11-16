@@ -84,7 +84,8 @@ public class ElectionTimer {
         if (cb == null) {
             return;
         }
-        log.debug("election timeout epoch={}", scheduledEpoch);
+        // Сам факт таймаута логирует RaftNode.onElectionTimeout: на этом потоке
+        // нет MDC (node/term/role), поэтому лог здесь был бы без контекста.
         cb.run();
     }
 

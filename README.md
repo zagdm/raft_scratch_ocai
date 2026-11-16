@@ -43,11 +43,17 @@ scripts\runtime\stop-cluster.cmd
 scripts\runtime\build-jar.cmd
 ```
 
-## In-memory режим (без файлов)
+## Хранилище
+
+По умолчанию используется **in-memory** режим: сохраняются только `currentTerm`/`votedFor` в памяти процесса, между перезапусками состояние не сохраняется.
+
+Файловый режим (персистентность между перезапусками):
 
 ```cmd
-scripts\runtime\start-cluster.cmd 3 18080 --jvm "-Draft.storage.type=memory"
+scripts\runtime\start-cluster.cmd 3 18080 --jvm "-Draft.storage.type=file"
 ```
+
+Путь задаётся через `-Draft.storage-path=...` (по умолчанию `data/raft-state.json`; скрипты используют `data/node-N.json`).
 
 ## Статус узла
 

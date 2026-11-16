@@ -41,30 +41,35 @@ if defined ERR (
 )
 
 rem ---- parse extra jvm args (--jvm "...") ----
+rem Everything after --jvm / --jvm-args is treated as JVM options. This also
+rem keeps flags working when they are forwarded unquoted by start-cluster.cmd.
 set "JVM_EXTRA="
-set "ARG4=%~4"
-set "ARG5=%~5"
-set "ARG6=%~6"
-set "ARG7=%~7"
-set "ARG8=%~8"
-set "ARG9=%~9"
-shift & shift & shift & shift & shift & shift & shift & shift & shift
+set "DRY_RUN="
+shift & shift & shift
 :parse_args
 if "%~1"=="" goto :args_done
-if /I "%~1"=="--jvm" (
-  shift
-  if not "%~1"=="" set "JVM_EXTRA=%JVM_EXTRA% %~1"
-  shift
-  goto :parse_args
-)
-if /I "%~1"=="--jvm-args" (
-  shift
-  if not "%~1"=="" set "JVM_EXTRA=%JVM_EXTRA% %~1"
+if /I "%~1"=="--jvm" goto :collect_jvm
+if /I "%~1"=="--jvm-args" goto :collect_jvm
+if /I "%~1"=="--dry-run" (
+  set "DRY_RUN=1"
   shift
   goto :parse_args
 )
 shift
 goto :parse_args
+
+:collect_jvm
+shift
+:collect_jvm_loop
+if "%~1"=="" goto :args_done
+if /I "%~1"=="--dry-run" (
+  set "DRY_RUN=1"
+  shift
+  goto :collect_jvm_loop
+)
+set "JVM_EXTRA=%JVM_EXTRA% %~1"
+shift
+goto :collect_jvm_loop
 :args_done
 
 rem ---- java ----
@@ -156,6 +161,15 @@ if defined PEERS (
 )
 echo Running peers: %RUNNING%/%PEER_TOTAL%
 
+if not defined DRY_RUN goto :do_start
+echo Command:
+if defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS%%JVM_EXTRA% -jar "%JAR%"
+if not defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE%%JVM_EXTRA% -jar "%JAR%"
+echo Dry run: node was not started.
+popd >nul
+exit /b 0
+
+:do_start
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if defined PEERS (
   start "raft-node-%NODE%" "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS% %JVM_EXTRA% -jar "%JAR%"
@@ -181,12 +195,13 @@ exit /b 0
 
 :usage
 echo.
-echo Usage: start-node.cmd ^<node^> [total-nodes] [base-port] [--jvm "..."] [--jvm-args "..."]
+echo Usage: start-node.cmd ^<node^> [total-nodes] [base-port] [--jvm "..."] [--jvm-args "..."] [--dry-run]
 echo.
 echo   node         node number, e.g. 2 or node-2 (required)
 echo   total-nodes  cluster size used to build the peers list (default 3)
 echo   base-port    port of node 1 (default 8080)
 echo   --jvm        extra JVM args passed directly to java before -jar
+echo   --dry-run    print the java command instead of starting the node
 echo.
 echo Examples:
 echo   start-node.cmd 2

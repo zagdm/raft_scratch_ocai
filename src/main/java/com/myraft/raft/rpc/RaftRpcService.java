@@ -43,7 +43,7 @@ public class RaftRpcService {
             }
             if (result.granted()) {
                 electionTimer.reset();
-                log.debug("vote granted (to candidate) {} term={}", request.getCandidateId(), result.term());
+                log.info("vote granted (to candidate) {} term={}", request.getCandidateId(), result.term());
                 log.debug("RequestVote response sent -> {} term={} granted=true", request.getCandidateId(), result.term());
                 return new RequestVoteResponse(result.term(), true);
             }
@@ -51,7 +51,7 @@ public class RaftRpcService {
                 log.debug("vote rejected (stale term, incoming RequestVote) from={} theirTerm={} term={}",
                         request.getCandidateId(), request.getTerm(), result.term());
             } else {
-                log.debug("vote rejected (already voted / condition failed) to {} term={}", request.getCandidateId(), result.term());
+                log.info("vote rejected (already voted / condition failed) to {} term={}", request.getCandidateId(), result.term());
             }
             log.debug("RequestVote response sent -> {} term={} granted=false", request.getCandidateId(), result.term());
             return new RequestVoteResponse(result.term(), false);

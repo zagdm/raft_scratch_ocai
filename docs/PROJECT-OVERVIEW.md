@@ -25,7 +25,7 @@
 
 ## Конфигурация и поведение
 - Таймауты/интервалы (по умолчанию): election `5000-8000ms`, heartbeat `1000ms`, RPC `RestTemplate` `200ms`.
-- Хранилище: `raft.storage.type=file` по умолчанию (`raft.storage-path`, напр. `data/node-N.json`); поддерживается in-memory режим `-Draft.storage.type=memory` (проверено запуском).
+- Хранилище: in-memory по умолчанию (состояние не переживает перезапуск); файловый режим включается `-Draft.storage.type=file` (`raft.storage-path`, напр. `data/node-N.json`).
 - Состояние Raft: персистятся только `currentTerm` и `votedFor`.
 - Атомарность term/vote (F1/F2): `RaftState.startElection`/`grantVote` и монотонный `updateTermAndVote` выполняются под write-lock с persist-before-visible; `RaftRpcService`/`RaftNode` используют атомарные решения/возвращаемый терм, предотвращая двойное голосование в терме и откат терма.
 - Логирование: консоль, MDC `[node/term/role]`, события `RequestVote`/`AppendEntries` отправки, приёма и ответов.

@@ -51,9 +51,10 @@ public class RaftNode {
         try {
             raftState.setRole(NodeRole.FOLLOWER);
             raftState.setLeaderId(null);
+            updateMdc();
             electionTimer.setTimeoutCallback(this::onElectionTimeout);
             electionTimer.start();
-            log.info("node started term={} votedFor={} peers={}",
+            log.info("node started as FOLLOWER term={} votedFor={} peers={}",
                     raftState.getCurrentTerm(), raftState.getVotedFor(), rpcClient.getPeers());
         } finally {
             clearMdc();
@@ -63,6 +64,7 @@ public class RaftNode {
     private void onElectionTimeout() {
         updateMdc();
         try {
+            log.debug("election timeout");
             if (raftState.getRole() == NodeRole.LEADER) {
                 electionTimer.reset();
                 return;
@@ -80,8 +82,7 @@ public class RaftNode {
             raftState.setRole(NodeRole.CANDIDATE);
             raftState.setLeaderId(null);
             updateMdc();
-            log.info("starting election term={}", newTerm);
-            log.debug("voted for self");
+            log.info("starting election term={} (voted for self)", newTerm);
             electionTimer.reset();
 
             List<String> peers = rpcClient.getPeers();
@@ -98,7 +99,7 @@ public class RaftNode {
                     if (resp == null) {
                         return;
                     }
-                    handleRequestVoteResponse(resp, votes, majority);
+                    handleRequestVoteResponse(peer, resp, votes, majority);
                 });
             }
         } finally {
@@ -116,11 +117,11 @@ public class RaftNode {
         }
     }
 
-    private synchronized void handleRequestVoteResponse(RequestVoteResponse resp, AtomicInteger votes, int majority) {
+    private synchronized void handleRequestVoteResponse(String peer, RequestVoteResponse resp, AtomicInteger votes, int majority) {
         updateMdc();
         try {
             if (resp.getTerm() > raftState.getCurrentTerm()) {
-                log.info("stepping down (outgoing RequestVote response has higher term) newTerm={}", resp.getTerm());
+                log.info("stepping down (outgoing RequestVote response has higher term) newTerm={} from={}", resp.getTerm(), peer);
                 raftState.updateTermAndVote(resp.getTerm(), null);
                 raftState.setRole(NodeRole.FOLLOWER);
                 raftState.setLeaderId(null);
@@ -136,12 +137,12 @@ public class RaftNode {
             }
             if (resp.isVoteGranted()) {
                 int v = votes.incrementAndGet();
-                log.info("vote granted ({}/{}) from peer response", v, majority);
+                log.info("vote granted ({}/{}) from peer response from={}", v, majority, peer);
                 if (v >= majority) {
                     becomeLeader();
                 }
             } else {
-                log.debug("vote rejected from peer response");
+                log.debug("vote rejected from peer response from={}", peer);
             }
         } finally {
             clearMdc();
@@ -187,7 +188,12 @@ public class RaftNode {
         updateMdc();
         try {
             List<String> peers = rpcClient.getPeers();
-            AppendEntriesRequest req = new AppendEntriesRequest(raftState.getCurrentTerm(), raftProperties.getNodeId());
+            int term = raftState.getCurrentTerm();
+            AppendEntriesRequest req = new AppendEntriesRequest(term, raftProperties.getNodeId());
+            int entriesCount = req.getEntries() == null ? 0 : req.getEntries().size();
+            if (!peers.isEmpty()) {
+                log.info("AppendEntries sent term={} entries={} peers={}", term, entriesCount, peers.size());
+            }
             for (String peer : peers) {
                 rpcClient.appendEntries(peer, req).thenAccept(resp -> {
                     if (resp == null) {

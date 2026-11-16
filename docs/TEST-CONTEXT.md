@@ -29,6 +29,6 @@
 - `raft.election-timeout-min-ms`: 5000, `raft.election-timeout-max-ms`: 8000
 - `raft.heartbeat-interval-ms`: 1000 (лидер шлёт пустые `AppendEntries`/heartbeats раз в секунду)
 - Сетевые таймауты `RestTemplate` (connect/read): 200мс
-- Хранилище: `raft.storage.type=file` по умолчанию (`raft.storage-path`, обычно `data/node-N.json`), in-memory режим поддерживается через `-Draft.storage.type=memory`
+- Хранилище: in-memory по умолчанию (состояние не переживает перезапуск); файловый режим включается `-Draft.storage.type=file` (`raft.storage-path`, обычно `data/node-N.json`)
 - Логи: консольный вывод с MDC `[node/term/role]`, видны события `RequestVote`/`AppendEntries` отправки, приёма и ответов (в т.ч. `AppendEntries ... entries=0`)
 - Текущая реализация election-only: атомарные переходы `currentTerm/votedFor` (`startElection`, `grantVote`, монотонный `updateTermAndVote`) предотвращают откат терма и двойное голосование в одном терме (F1/F2)

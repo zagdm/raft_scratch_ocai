@@ -23,7 +23,7 @@ import java.nio.file.StandardOpenOption;
  * {@code rename}. Это защищает от частично записанного файла при падении процесса.
  */
 @Component
-@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name = "raft.storage.type", havingValue = "file", matchIfMissing = true)
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name = "raft.storage.type", havingValue = "file")
 public class FileRaftStorage implements RaftStorage {
     private static final Logger log = LoggerFactory.getLogger(FileRaftStorage.class);
 

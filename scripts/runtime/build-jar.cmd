@@ -8,17 +8,25 @@ for %%i in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fi"
 pushd "%PROJECT_ROOT%" >nul
 
 echo [build-jar] Building in "%PROJECT_ROOT%"...
-if exist "mvnw.cmd" (
-  call mvnw.cmd -DskipTests package
-) else (
+
+set "MVN_CMD="
+if exist "mvnw.cmd" set "MVN_CMD=mvnw.cmd"
+if not defined MVN_CMD (
   where mvn >nul 2>nul
-  if errorlevel 1 (
-    echo [build-jar] ERROR: mvn not found in PATH and mvnw.cmd missing.
-    popd >nul
-    exit /b 1
-  )
-  call mvn -DskipTests package
+  if not errorlevel 1 set "MVN_CMD=mvn"
 )
+if not defined MVN_CMD if defined MAVEN_HOME if exist "%MAVEN_HOME%\bin\mvn.cmd" set "MVN_CMD=%MAVEN_HOME%\bin\mvn.cmd"
+if not defined MVN_CMD if exist "C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2025.2.4\plugins\maven\lib\maven3\bin\mvn.cmd" set "MVN_CMD=C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2025.2.4\plugins\maven\lib\maven3\bin\mvn.cmd"
+if not defined MVN_CMD if exist "C:\Program Files\JetBrains\IntelliJ IDEA\plugins\maven\lib\maven3\bin\mvn.cmd" set "MVN_CMD=C:\Program Files\JetBrains\IntelliJ IDEA\plugins\maven\lib\maven3\bin\mvn.cmd"
+
+if not defined MVN_CMD (
+  echo [build-jar] ERROR: Maven not found. Set MAVEN_HOME, add mvn to PATH, or install IntelliJ Maven bundle.
+  popd >nul
+  exit /b 1
+)
+
+echo [build-jar] Using Maven: "%MVN_CMD%"
+call "%MVN_CMD%" -DskipTests package
 if errorlevel 1 (
   echo [build-jar] BUILD FAILED
   popd >nul
@@ -26,4 +34,4 @@ if errorlevel 1 (
 )
 echo [build-jar] DONE
 popd >nul
-exit /b 0
+exit /b 0

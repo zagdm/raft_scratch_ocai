@@ -43,10 +43,11 @@ goto :collect_args
 :collect_done
 :forward_loop
 if "%~1"=="" goto :forward_done
-if "%EXTRA_ARGS%"=="" (
-  set "EXTRA_ARGS=%~1"
+if /I "%~1"=="--dry-run" set "DRY_RUN=1"
+if not defined EXTRA_ARGS (
+  set "EXTRA_ARGS="%~1""
 ) else (
-  set "EXTRA_ARGS=%EXTRA_ARGS% %~1"
+  set "EXTRA_ARGS=%EXTRA_ARGS% "%~1""
 )
 shift
 goto :forward_loop
@@ -57,7 +58,7 @@ set /a FAILED=0
 for /L %%i in (1,1,%NODES%) do (
   echo.
   echo === raft-node-%%i of %NODES% ===
-  if "%EXTRA_ARGS%"=="" (
+  if not defined EXTRA_ARGS (
     call "%SCRIPT_DIR%start-node.cmd" %%i %NODES% %BASE_PORT%
   ) else (
     call "%SCRIPT_DIR%start-node.cmd" %%i %NODES% %BASE_PORT% %EXTRA_ARGS%
@@ -70,7 +71,11 @@ for /L %%i in (1,1,%NODES%) do (
 
 echo.
 if %FAILED%==0 (
-  echo Started %NODES% nodes - one console window per node.
+  if defined DRY_RUN (
+    echo Dry run: commands printed above, nothing was started.
+  ) else (
+    echo Started %NODES% nodes - one console window per node.
+  )
 ) else (
   echo WARNING: !FAILED! of %NODES% nodes failed to start.
 )
@@ -94,11 +99,12 @@ exit /b 0
 
 :usage
 echo.
-echo Usage: start-cluster.cmd [total-nodes] [base-port] [--jvm "..."] [--jvm-args "..."]
+echo Usage: start-cluster.cmd [total-nodes] [base-port] [--jvm "..."] [--jvm-args "..."] [--dry-run]
 echo.
 echo   total-nodes  number of nodes to start (default 3)
 echo   base-port    port of node 1, node N uses base-port + N - 1 (default 8080)
 echo   --jvm        extra JVM args passed directly to java before -jar (forwarded to each node)
+echo   --dry-run    print the java command for each node instead of starting the cluster
 echo.
 echo Examples:
 echo   start-cluster.cmd

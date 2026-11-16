@@ -7,10 +7,12 @@ import com.myraft.raft.rpc.dto.RequestVoteRequest;
 import com.myraft.raft.rpc.dto.RequestVoteResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 @Component
@@ -26,7 +28,13 @@ public class RaftRpcClient {
 
     public CompletableFuture<RequestVoteResponse> requestVote(String peer, RequestVoteRequest request) {
         String url = peer + "/raft/requestVote";
+        Map<String, String> mdc = MDC.getCopyOfContextMap();
         return CompletableFuture.supplyAsync(() -> {
+            if (mdc != null) {
+                MDC.setContextMap(mdc);
+            } else {
+                MDC.clear();
+            }
             try {
                 log.info("RequestVote sent -> {} term={}", peer, request.getTerm());
                 RequestVoteResponse response = restTemplate.postForObject(url, request, RequestVoteResponse.class);
@@ -35,6 +43,8 @@ public class RaftRpcClient {
             } catch (RestClientException e) {
                 log.trace("vote request failed {}: {}", peer, e.getMessage());
                 return null;
+            } finally {
+                MDC.clear();
             }
         });
     }
@@ -42,15 +52,23 @@ public class RaftRpcClient {
     public CompletableFuture<AppendEntriesResponse> appendEntries(String peer, AppendEntriesRequest request) {
         String url = peer + "/raft/appendEntries";
         int entriesCount = request.getEntries() == null ? 0 : request.getEntries().size();
+        Map<String, String> mdc = MDC.getCopyOfContextMap();
         return CompletableFuture.supplyAsync(() -> {
+            if (mdc != null) {
+                MDC.setContextMap(mdc);
+            } else {
+                MDC.clear();
+            }
             try {
-                log.info("AppendEntries sent -> {} term={} entries={}", peer, request.getTerm(), entriesCount);
+                log.debug("AppendEntries sent -> {} term={} entries={}", peer, request.getTerm(), entriesCount);
                 AppendEntriesResponse response = restTemplate.postForObject(url, request, AppendEntriesResponse.class);
                 log.debug("AppendEntries response from {} term={} success={}", peer, response == null ? -1 : response.getTerm(), response == null ? null : response.isSuccess());
                 return response;
             } catch (RestClientException e) {
                 log.trace("heartbeat failed {}: {}", peer, e.getMessage());
                 return null;
+            } finally {
+                MDC.clear();
             }
         });
     }
