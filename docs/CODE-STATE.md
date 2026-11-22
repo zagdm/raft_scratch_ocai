@@ -6,7 +6,7 @@
 - Java 21, Spring Boot 3.3.5, Maven (`spring-boot-starter-web`, `spring-boot-configuration-processor`, `spring-boot-starter-test`).
 - Основные пакеты: `api`, `config`, `raft.model`, `raft.rpc`, `raft.rpc.dto`, `raft.storage`, `raft.timer`, `raft` (`RaftNode`).
 - Конфигурация (`application.yml`, по умолчанию): `raft.election-timeout-min-ms=5000`, `raft.election-timeout-max-ms=8000`, `raft.heartbeat-interval-ms=1000`, `raft.storage-path=data/raft-state.json`, `RestTemplate` connect/read `200ms`.
-- Тесты: `mvn test` — 13 тестов, BUILD SUCCESS (`StatusResponseJsonTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`).
+- Тесты: `mvn test` — 19 тестов, BUILD SUCCESS (`MyRaftApplicationTests` (`@SpringBootTest` contextLoads), `StatusResponseJsonTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.rpc.RaftRpcOutcomeTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`).
 
 ## Контракты ключевых классов
 
@@ -22,10 +22,10 @@
   - `candidateTerm == currentTerm` и `votedFor == null || votedFor.equals(candidateId)` → `persist(currentTerm, candidateId)`, установка/подтверждение `votedFor`, `granted=true`;
   - иначе отказ. **Persist-before-visible** при изменении/фиксации голоса; не более одного голоса в терме.
 - `updateTermAndVote(int term, String votedFor): void` — **монотонная атомарная операция** (под `writeLock`): если `term < currentTerm` — no-op без изменения `votedFor`; иначе `persist(term, votedFor)` затем публикация полей.
+- `snapshot(): RaftStateSnapshot(currentTerm, votedFor, role, leaderId, startTime)` — согласованный снимок всех полей под одним `readLock`; используется для логирования решений, `/status` и проверок «до/после». Внутренний лок (`getLock()`) наружу **не** экспонируется, чтобы не создавать обходной порядок блокировок.
 - `getCurrentTerm/getVotedFor/getRole/getLeaderId` — чтения под `readLock`; `setRole/setLeaderId` — записи под `writeLock` (но **отдельно** от term/vote-переходов).
-- `getLock()` экспонирует внутренний `ReentrantReadWriteLock`.
 
-**Ответственность за атомарность:** отвечает за атомарность и монотонность **только** пары `currentTerm/votedFor` и их персистентной фиксации относительно видимости. **Не** обеспечивает атомарность составных переходов узла (`term/vote` + `role` + `leaderId` + таймеры + heartbeats).
+**Ответственность за атомарность:** отвечает за атомарность и монотонность **только** пары `currentTerm/votedFor` и их персистентной фиксации относительно видимости. **Не** обеспечивает атомарность составных переходов узла (`term/vote` + `role` + `leaderId` + таймеры + heartbeats) — их сериализует `RaftNode` через `nodeLock`.
 
 ### `raft.storage.RaftStorage` и реализации
 **`RaftStorage` (`raft/storage/RaftStorage.java`) контракт:**
@@ -40,39 +40,64 @@
 - Хранит `volatile PersistedState`; `load/persist` — `synchronized`. **Не обеспечивает персистентность между перезапусками**, обеспечивает потокобезопасный доступ в памяти.
 
 ### `raft.RaftNode` (`src/main/java/com/myraft/raft/RaftNode.java`)
-**Назначение:** оркестрация жизненного цикла узла (старт, таймаут выборов, выборы, лидерство, heartbeats) и обработка ответов на исходящие RPC.
+**Назначение:** единственная точка принятия решений и мутаций состояния узла (старт, таймаут выборов, выборы, лидерство, heartbeats, обработка входящих RPC и ответов на исходящие RPC).
 
 **Контракт:**
-- `init()` (`@PostConstruct`): переводит узел в `FOLLOWER`, сбрасывает `leaderId`, регистрирует callback election timer и запускает таймер.
-- `onElectionTimeout()`: если `LEADER` — reset таймера, иначе запускает `startElection()`.
+- **Единый `nodeLock`** (`private final Object`) сериализует все переходы узла: `role`/`leaderId`, election timer, запуск/остановку heartbeats, обработку входящих RPC и колбэков ответов.
+- `init()` (`@PostConstruct`): под `nodeLock` переводит узел в `FOLLOWER`, сбрасывает `leaderId`, регистрирует callback election timer и запускает таймер.
+- `handleRequestVote(RequestVoteRequest): RequestVoteOutcome` — под `nodeLock`: снимает `before`-снапшот, вызывает `RaftState.grantVote(...)`, применяет side-effects (`FOLLOWER`/`leaderId=null` при росте терма, иначе `reset()` таймера при **первом** голосе); событие узла — `GRANTED`, `GRANTED_TERM_ADVANCED`, `REJECTED_STALE_TERM`, `REJECTED_ALREADY_VOTED`. Повторный голос тому же кандидату возвращается как `GRANTED` и классифицируется в `GRANTED_REPEAT` сервисом; узел в этом случае таймер не трогает. **Не логирует** и не трогает MDC.
+- `resetElectionTimerIfUnchanged(RaftStateSnapshot expected)` — под `nodeLock` сравнивает текущий снапшот с `after` из outcome (term/votedFor/role) и только при совпадении сбрасывает election timer. Используется сервисом для эффекта `GRANTED_REPEAT` без прямого доступа к таймеру и без сброса после параллельного step-down/смены роли.
+- `handleAppendEntries(AppendEntriesRequest): AppendEntriesOutcome` — под `nodeLock`: `before`-снапшот; `request.term < currentTerm` → `REJECTED_STALE_TERM` без мутаций; **равный терм и уже известный `leaderId != null`, отличный от `request.leaderId` → `REJECTED_FOREIGN_LEADER` без мутаций**; иначе монотонный `updateTermAndVote(term, null)` при росте терма, `becomeFollowerLocked(leaderId, true)`; событие `ACCEPTED_TERM_ADVANCED` / `ACCEPTED_LEADER_DISCOVERED` / `ACCEPTED_IDEMPOTENT` (первые два приоритетнее). **Не логирует**.
+- `onElectionTimeout()`: логирует `election timeout`, затем `startElection()`; если узел `LEADER` — только reset таймера.
 - `startElection()`:
-  - вызывает `raftState.startElection(nodeId)` и получает новый терм;
-  - отдельно устанавливает `role=CANDIDATE`, `leaderId=null`, сбрасывает election timer;
-  - голосует за себя, при необходимости сразу становится лидером (single-node/кворум), рассылает `RequestVote(newTerm, nodeId)` пирам; колбэки ответов обрабатываются асинхронно.
-- `handleRequestVoteResponse(...)` (`synchronized` на `RaftNode`): при `resp.term > currentTerm` выполняет step-down (`updateTermAndVote(resp.term,null)`, `FOLLOWER`, `leaderId=null`, stop heartbeats, reset timer); учитывает ответ только если узел всё ещё `CANDIDATE` и терм совпадает; при кворуме вызывает `becomeLeader()`.
-- `becomeLeader()` (`synchronized`): разрешён только из `CANDIDATE`; устанавливает `LEADER`, `leaderId=self`, запускает heartbeats.
-- `startHeartbeats()/stopHeartbeats()` (`synchronized`): управляют единичной задачей в `raft-heartbeat` (`scheduleWithFixedDelay`, интервал фиксированный `heartbeatIntervalMs`).
-- `sendHeartbeats()`: если не `LEADER` — останавливает heartbeats; иначе рассылает пустые `AppendEntries(currentTerm, nodeId)` всем пирам, ответы обрабатываются асинхронно.
-- `handleAppendEntriesResponse(...)` (`synchronized`): при не-лидере игнорирует; при `resp.term > currentTerm` выполняет step-down.
+  - под `nodeLock`: проверка «не лидер», `raftState.startElection(nodeId)`, затем проверка (1) — терм и self-vote всё ещё актуальны; установка `role=CANDIDATE`, `leaderId=null`, логирование `starting election`, reset таймера;
+  - если кворум уже достигнут (single-node) — `tryBecomeLeaderLocked` под тем же локом;
+  - рассылка `RequestVote(newTerm, nodeId)` пирам — **вне `nodeLock`**.
+- `handleRequestVoteResponse(...)`: под `nodeLock`; при `resp.term > currentTerm` — step-down (`updateTermAndVote`, `FOLLOWER`, `leaderId=null`, stop heartbeats, reset timer); ответ учитывается только если терм совпадает с термом кампании, узел `CANDIDATE` и голосовал за себя (проверка (4)); при кворуме — `tryBecomeLeaderLocked`.
+- `tryBecomeLeaderLocked(...)` (проверка (2)): переводит в `LEADER` только если кворум собран **и** узел всё ещё `CANDIDATE` в ожидаемом терме с self-vote; логирует `became leader`, запускает heartbeats.
+- `startHeartbeatsLocked()/stopHeartbeatsLocked()`: управляют единичной задачей в `raft-heartbeat` (`scheduleWithFixedDelay`, интервал `heartbeatIntervalMs`); вызываются только под `nodeLock`.
+- `sendHeartbeats()`: под `nodeLock` проверяет (5) актуальность лидерства/терма, фиксирует `AppendEntries(currentTerm, nodeId)` и список пиров, иначе останавливает heartbeats; логирует `AppendEntries sent` и рассылает RPC **вне `nodeLock`**.
+- `handleAppendEntriesResponse(...)`: под `nodeLock`; ответ учитывается только для актуального лидерства/терма (проверка (5)); при `resp.term > currentTerm` — step-down.
+- `shutdown()` (`@PreDestroy`): под `nodeLock` останавливает таймер, heartbeats и `heartbeatScheduler`.
 
-**Ответственность за атомарность/конкурентность:** **не обеспечивает атомарность составных переходов узла**. Сериализованы только отдельные `synchronized` методы; `startElection`, `sendHeartbeats`, фоновые потоки (`raft-election-timer`, `raft-heartbeat`) и асинхронные RPC-колбэки могут конкурировать между собой и с HTTP-обработчиками. Корректность campaign/лидерства опирается на проверки роли/терма и атомарность `RaftState` для term/vote, но не на единый атомарный state transition.
+**Ответственность за атомарность/конкурентность:** обеспечивает атомарность **составных** переходов узла в рамках одного процесса: решение и все его side-effects (`role`, `leaderId`, timer, heartbeats) выполняются под `nodeLock`. Порядок блокировок: **`nodeLock` → лок `RaftState`**; обратный порядок запрещён (внутренний лок `RaftState` не экспонируется). Сетевые вызовы выполняются вне `nodeLock`, поэтому медленный/зависший пир не блокирует обработку входящих RPC и таймеры; актуальность контекста после сети проверяется повторно под локом.
+
+### `raft.model` outcome/event-типы
+- `StateTransition(before, after)` — пара `RaftStateSnapshot`, описывающая ровно один переход.
+- `RequestVoteOutcome(event, state)` / `AppendEntriesOutcome(event, state)` — решение узла + переход; `granted()`/`accepted()` — производные предикаты для формирования ответа.
+- `RequestVoteEvent`: `GRANTED`, `GRANTED_REPEAT` (`before.votedFor == candidate` при равном терме; определяется **сервисом**), `GRANTED_TERM_ADVANCED`, `REJECTED_STALE_TERM`, `REJECTED_ALREADY_VOTED`.
+- `AppendEntriesEvent`: `ACCEPTED_TERM_ADVANCED` (приоритет), `ACCEPTED_LEADER_DISCOVERED` (смена роли и/или `leaderId`), `ACCEPTED_IDEMPOTENT`, `REJECTED_STALE_TERM`, `REJECTED_FOREIGN_LEADER` (равный терм, другой лидер). `accepted()` истинно только для `ACCEPTED_*`.
 
 ### `raft.rpc.RaftRpcService` (`src/main/java/com/myraft/raft/rpc/RaftRpcService.java`)
-**Назначение:** обработка входящих Raft RPC (`RequestVote`, `AppendEntries`) и применение побочных эффектов на основе решений состояния.
+**Назначение:** тонкий адаптер «входящий RPC → `RaftNode` → лог/ответ». Состояние не мутирует напрямую; единственный побочный эффект — сброс election timer через узел при `GRANTED_REPEAT`.
 
 **Контракт:**
+- Конструктор (единственный, для DI): `(RaftNode, RaftState, RaftProperties)`.
 - `handleRequestVote(RequestVoteRequest)`:
-  - получает решение через `raftState.grantVote(request.term, request.candidateId)` (атомарное решение по term/vote);
-  - при `termIncreased` выполняет side-effects: `setRole(FOLLOWER)`, `setLeaderId(null)`, `electionTimer.reset()`;
-  - при `granted` сбрасывает election timer и отвечает `voteGranted=true`; иначе отвечает отказом с текущим термом из результата.
-  - **Persist-before-respond** для term/vote обеспечивается через `RaftState.grantVote`.
+  - снимает `pre`-снапшот для MDC;
+  - **prefilter** (синтетический outcome `StateTransition(pre, pre)`, узел не вызывается): `request.term < pre.currentTerm` → `REJECTED_STALE_TERM`; либо `request.term == pre.currentTerm && pre.votedFor != null && pre.votedFor != request.candidateId` → `REJECTED_ALREADY_VOTED`;
+  - иначе вызывает `raftNode.handleRequestVote(request)`;
+  - уточняет событие: если узел вернул `GRANTED` и `before.votedFor == candidate`, event заменяется на `GRANTED_REPEAT` и вызывается `raftNode.resetElectionTimerIfUnchanged(after)` (таймер сбрасывается под `nodeLock`, только если состояние всё ещё совпадает с outcome);
+  - переключает MDC на `after`-снапшот, логирует событие, собирает `RequestVoteResponse(after.currentTerm(), outcome.granted())`;
+  - живое состояние после вызова узла **не перечитывается** (кроме защитной проверки в методе узла при `GRANTED_REPEAT`).
 - `handleAppendEntries(AppendEntriesRequest)`:
-  - stale (`request.term < currentTerm`) → `success=false`, `votedFor` не меняется;
-  - `request.term > currentTerm` → `raftState.updateTermAndVote(request.term, null)` (монотонно);
-  - для валидного терма переводит в `FOLLOWER` при необходимости, обновляет `leaderId`, сбрасывает election timer, отвечает `success=true` текущим термом.
-  - Журнал/entries не валидируются и не применяются (heartbeat/election-only).
+  - **prefilter**: `request.term < pre.currentTerm` → `REJECTED_STALE_TERM`; либо `request.term == pre.currentTerm && pre.leaderId != null && pre.leaderId != request.leaderId` → `REJECTED_FOREIGN_LEADER`;
+  - иначе вызывает `raftNode.handleAppendEntries(request)` (авторитетная проверка чужого лидера под `nodeLock`);
+  - логирует `AppendEntries received`, ответ из `after.currentTerm()` и `outcome.accepted()`.
+- Логи по событию (MDC `nodeId/term/role` из `after`):
+  - `GRANTED` / `GRANTED_REPEAT` → `vote granted (...)`;
+  - `GRANTED_TERM_ADVANCED` → `stepping down (incoming RequestVote has higher term)` + `vote granted (to candidate) ... (was N)`;
+  - `REJECTED_STALE_TERM` → DEBUG `vote rejected (stale term, ...)`;
+  - `REJECTED_ALREADY_VOTED` → `vote rejected (already voted / condition failed)`;
+  - `ACCEPTED_TERM_ADVANCED` → `stepping down (incoming AppendEntries has higher term)`;
+  - `ACCEPTED_LEADER_DISCOVERED` → `discovered new leader` (если роль была не `FOLLOWER`) и/или `leader changed to ...` (если сменился `leaderId`);
+  - `ACCEPTED_IDEMPOTENT` → DEBUG `heartbeat accepted (no state change)`;
+  - `REJECTED_STALE_TERM` → DEBUG `heartbeat ignored (incoming AppendEntries stale term)`;
+  - `REJECTED_FOREIGN_LEADER` → DEBUG `heartbeat ignored (foreign leader at same term) from=... currentLeader=...`.
+- **Persist-before-respond** обеспечивается `RaftState` (persist выполняется внутри решения до возврата outcome). При исключении `storage.persist` событие не логируется, ответ не формируется — исключение уходит наверх (HTTP 500).
+- Журнал/entries не валидируются и не применяются (heartbeat/election-only).
 
-**Ответственность за атомарность/конкурентность:** не атомарен как единый обработчик перехода узла; атомарность ограничена вызовами `RaftState` (`grantVote`, `updateTermAndVote`). Между решением/обновлением term-vote и побочными эффектами (`role`, `leaderId`, timer, формирование ответа/логов) возможны гонки с другими потоками.
+**Ответственность за атомарность/конкурентность:** сервис состояния не защищает и не сериализует; весь переход (решение + side-effects + снапшоты) атомарен внутри `RaftNode` под `nodeLock`; сброс таймера по `GRANTED_REPEAT` также выполняется узлом под `nodeLock` с re-check'ом против `after`. MDC выставляется/очищается в потоке HTTP-запроса.
 
 ### `raft.rpc.RaftRpcClient` (`src/main/java/com/myraft/raft/rpc/RaftRpcClient.java`)
 **Назначение:** исходящие HTTP RPC к пирам.
@@ -96,10 +121,11 @@
 **Назначение:** диагностический HTTP endpoint.
 
 **Контракт:**
-- `GET /status` формирует `StatusResponse(nodeId, role, currentTerm, leaderId, peers, isLeader, uptime)` из отдельных чтений `RaftState`/`RaftProperties`/`RaftRpcClient`.
-- Не выполняет мутаций состояния; не собирает согласованный снимок под единым локом.
+- `GET /status` формирует `StatusResponse(nodeId, role, currentTerm, leaderId, peers, isLeader, uptime)` из **одного** `RaftState.snapshot()` (read-lock); `nodeLock` не захватывается.
+- `MDC` (`nodeId/term/role`) выставляется из снапшота на время обработки запроса.
+- Не выполняет мутаций состояния.
 
-**Ответственность за атомарность/конкурентность:** не гарантирует консистентность набора полей между собой при конкурентных изменениях.
+**Ответственность за атомарность/конкурентность:** набор полей `RaftState` согласован между собой (один `readLock`); `peers` берутся из статической конфигурации. `nodeLock` не участвует, поэтому `/status` не блокирует Raft-переходы и не может вызвать инверсию блокировок.
 
 ### `raft.timer.ElectionTimer` (`src/main/java/com/myraft/raft/timer/ElectionTimer.java`)
 **Назначение:** управление таймаутом выборов.
@@ -120,11 +146,20 @@
 
 ## Границы ответственности по атомарности (сводно)
 - **Атомарно и с persist-before-visible:** инкремент терма/выдача голоса/монотонное обновление `currentTerm,votedFor` (`RaftState` + `RaftStorage.persist`).
-- **Не атомарно как единая операция:** переходы узла `FOLLOWER/CANDIDATE/LEADER`, обновление `leaderId`, сброс/запуск таймеров и heartbeats, обработка входящих/исходящих RPC end-to-end, формирование `/status` снимка.
+- **Атомарно в рамках процесса (под `nodeLock`):** составные переходы узла `FOLLOWER/CANDIDATE/LEADER` + `leaderId` + election timer + запуск/остановка heartbeats + обработка входящих RPC и колбэков ответов; решение и его side-effects логируются из `before/after`-снапшотов этого перехода.
+- **Вне `nodeLock`:** сетевые вызовы (`RaftRpcClient`), построение `/status` (только `RaftState.snapshot()`).
+- **Порядок блокировок:** `nodeLock` → лок `RaftState`; обратный порядок запрещён (внутренний лок `RaftState` не экспонируется). `RaftRpcClient` не удерживает ни один из локов во время HTTP-вызова.
 - **Источники конкуренции:** HTTP-запросы (`/raft/*`, `/status`), `raft-election-timer`, `raft-heartbeat`, асинхронные RPC-вызовы/колбэки (`CompletableFuture.supplyAsync`).
+
+## Логирование решений (RPC outcome logging)
+- Входящие RPC: `RaftNode` возвращает outcome, `RaftRpcService` логирует `vote granted/stepping down/leader changed/...` и формирует ответ из `after.currentTerm()`.
+- Исходящие: `starting election`, `RequestVote sent term=... peers=N` (одна строка на раунд выборов в `RaftNode`; per-peer строки `RaftRpcClient` — DEBUG), `vote granted (n/m) from peer ... from=<peer>`, `became leader`, `stepping down (outgoing ... higher term)`, `AppendEntries sent` (раз в раунд на лидере).
+- MDC (`nodeId/term/role`) выставляется в точке логирования из снапшота: async-колбэки и heartbeat-поток не наследуют MDC HTTP-потока.
+- Решение и его side-effects не логируются повторным чтением живого состояния — только из `StateTransition`.
 
 ## Оставшиеся ограничения реализации
 - Нет репликации лога/FSM, commit/apply, снапшотов, pre-vote, динамической конфигурации.
 - Персистируются только `currentTerm/votedFor`; `role/leaderId` не восстанавливаются.
-- `AppendEntries` не проверяет согласованность лога и в допустимом терме возвращает `success=true`.
-- Составные переходы узла не сериализованы единым локом/event-loop; `/status` может быть несогласованным снимком.
+- `AppendEntries` не проверяет согласованность лога; при валидном терме и известном/том же лидере возвращает `success=true`.
+- При равном терме heartbeat принимается только от уже известного лидера (`leaderId == null` или совпадает); от другого лидера — `REJECTED_FOREIGN_LEADER`. Проверка относится только к терму/лидеру, не к содержимому журнала.
+- `nodeLock` сериализует переходы только внутри одного процесса; корректность между узлами по-прежнему опирается на Raft-инварианты терма/голоса.

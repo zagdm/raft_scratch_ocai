@@ -45,6 +45,21 @@ public class RaftState {
     public record GrantVoteResult(boolean granted, boolean termIncreased, int term) {}
 
     /**
+     * Согласованный снимок состояния узла: все поля читаются под одним read-lock,
+     * поэтому набор значений относится к одному моменту времени.
+     */
+    public record RaftStateSnapshot(int currentTerm, String votedFor, NodeRole role, String leaderId, long startTime) {}
+
+    public RaftStateSnapshot snapshot() {
+        lock.readLock().lock();
+        try {
+            return new RaftStateSnapshot(currentTerm, votedFor, role, leaderId, startTime);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
      * Атомарно начинает выборы: инкрементирует терм и голосует за себя.
      * Сначала состояние фиксируется в хранилище, и только потом становится видимым.
      */
@@ -147,9 +162,5 @@ public class RaftState {
 
     public long getStartTime() {
         return startTime;
-    }
-
-    public ReentrantReadWriteLock getLock() {
-        return lock;
     }
 }

@@ -1,8 +1,14 @@
 package com.myraft.raft;
 
 import com.myraft.config.RaftProperties;
+import com.myraft.raft.model.AppendEntriesEvent;
+import com.myraft.raft.model.AppendEntriesOutcome;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
+import com.myraft.raft.model.RaftState.RaftStateSnapshot;
+import com.myraft.raft.model.RequestVoteEvent;
+import com.myraft.raft.model.RequestVoteOutcome;
+import com.myraft.raft.model.StateTransition;
 import com.myraft.raft.rpc.RaftRpcClient;
 import com.myraft.raft.rpc.dto.AppendEntriesRequest;
 import com.myraft.raft.rpc.dto.AppendEntriesResponse;
@@ -17,15 +23,26 @@ import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Единственная точка принятия решений и мутаций состояния узла.
+ * <p>
+ * Все переходы ({@code role}, {@code leaderId}, election timer, heartbeats) выполняются
+ * под единым {@link #nodeLock}. Порядок блокировок: сначала {@code nodeLock}, затем
+ * внутренний лок {@link RaftState}; обратный порядок запрещён. Сетевые вызовы
+ * выполняются вне {@code nodeLock} на основе зафиксированного контекста.
+ */
 @Component
 public class RaftNode {
     private static final Logger log = LoggerFactory.getLogger(RaftNode.class);
+
+    private final Object nodeLock = new Object();
     private final RaftState raftState;
     private final RaftProperties raftProperties;
     private final RaftRpcClient rpcClient;
@@ -36,7 +53,7 @@ public class RaftNode {
         return t;
     });
 
-    private volatile ScheduledFuture<?> heartbeatTask;
+    private ScheduledFuture<?> heartbeatTask;
 
     public RaftNode(RaftState raftState, RaftProperties raftProperties, RaftRpcClient rpcClient, ElectionTimer electionTimer) {
         this.raftState = raftState;
@@ -49,11 +66,11 @@ public class RaftNode {
     public void init() {
         updateMdc();
         try {
-            raftState.setRole(NodeRole.FOLLOWER);
-            raftState.setLeaderId(null);
-            updateMdc();
-            electionTimer.setTimeoutCallback(this::onElectionTimeout);
-            electionTimer.start();
+            synchronized (nodeLock) {
+                becomeFollowerLocked(null, false);
+                electionTimer.setTimeoutCallback(this::onElectionTimeout);
+                electionTimer.start();
+            }
             log.info("node started as FOLLOWER term={} votedFor={} peers={}",
                     raftState.getCurrentTerm(), raftState.getVotedFor(), rpcClient.getPeers());
         } finally {
@@ -61,14 +78,114 @@ public class RaftNode {
         }
     }
 
+    // ---------------------------------------------------------------- inbound RPC
+
+    /**
+     * Обрабатывает входящий {@code RequestVote} и возвращает решение вместе со снапшотами.
+     * Логирование и построение ответа — ответственность {@code RaftRpcService}.
+     */
+    public RequestVoteOutcome handleRequestVote(RequestVoteRequest request) {
+        synchronized (nodeLock) {
+            RaftStateSnapshot before = raftState.snapshot();
+            RaftState.GrantVoteResult result = raftState.grantVote(request.getTerm(), request.getCandidateId());
+
+            boolean granted = result.granted();
+            // Повторный голос тому же кандидату классифицируется сервисом (GRANTED_REPEAT),
+            // здесь он остаётся обычным GRANTED; таймер сбрасывает сервис через узел.
+            boolean repeat = granted && !result.termIncreased()
+                    && Objects.equals(before.votedFor(), request.getCandidateId());
+            if (granted) {
+                if (result.termIncreased()) {
+                    becomeFollowerLocked(null, true);
+                } else if (!repeat) {
+                    electionTimer.reset();
+                }
+            }
+
+            RequestVoteEvent event;
+            if (!granted) {
+                event = request.getTerm() < result.term()
+                        ? RequestVoteEvent.REJECTED_STALE_TERM
+                        : RequestVoteEvent.REJECTED_ALREADY_VOTED;
+            } else if (result.termIncreased()) {
+                event = RequestVoteEvent.GRANTED_TERM_ADVANCED;
+            } else {
+                event = RequestVoteEvent.GRANTED;
+            }
+
+            RaftStateSnapshot after = raftState.snapshot();
+            return new RequestVoteOutcome(event, new StateTransition(before, after));
+        }
+    }
+
+    /**
+     * Сбрасывает election timer, только если состояние узла всё ещё соответствует
+     * снапшоту {@code after} из outcome. Вызывается сервисом при {@code GRANTED_REPEAT}:
+     * сам сервис таймера не трогает, а узел выполняет эффект под {@code nodeLock},
+     * не сбрасывая таймер после возможного параллельного step-down/смены роли.
+     */
+    public void resetElectionTimerIfUnchanged(RaftStateSnapshot expected) {
+        synchronized (nodeLock) {
+            RaftStateSnapshot current = raftState.snapshot();
+            if (current.currentTerm() == expected.currentTerm()
+                    && Objects.equals(current.votedFor(), expected.votedFor())
+                    && current.role() == expected.role()) {
+                electionTimer.reset();
+            }
+        }
+    }
+
+    /**
+     * Обрабатывает входящий {@code AppendEntries} (в этой реализации — heartbeat).
+     * Терм проверяется повторно под {@code nodeLock}; лидер принимается только при
+     * актуальном терме запроса.
+     */
+    public AppendEntriesOutcome handleAppendEntries(AppendEntriesRequest request) {
+        synchronized (nodeLock) {
+            RaftStateSnapshot before = raftState.snapshot();
+            if (request.getTerm() < before.currentTerm()) {
+                return new AppendEntriesOutcome(AppendEntriesEvent.REJECTED_STALE_TERM,
+                        new StateTransition(before, before));
+            }
+            // При равном терме уже известный лидер не сменяется: второй лидер в том же
+            // терме — признак рассинхрона/старого сообщения, heartbeat не принимаем.
+            if (request.getTerm() == before.currentTerm()
+                    && before.leaderId() != null
+                    && !Objects.equals(before.leaderId(), request.getLeaderId())) {
+                return new AppendEntriesOutcome(AppendEntriesEvent.REJECTED_FOREIGN_LEADER,
+                        new StateTransition(before, before));
+            }
+
+            boolean termAdvanced = request.getTerm() > before.currentTerm();
+            if (termAdvanced) {
+                raftState.updateTermAndVote(request.getTerm(), null);
+            }
+
+            boolean roleChanged = before.role() != NodeRole.FOLLOWER;
+            boolean leaderChanged = !Objects.equals(before.leaderId(), request.getLeaderId());
+            // updateTermAndVote меняет только term/vote, поэтому role/leaderId из before актуальны.
+            becomeFollowerLocked(request.getLeaderId(), true);
+
+            AppendEntriesEvent event;
+            if (termAdvanced) {
+                event = AppendEntriesEvent.ACCEPTED_TERM_ADVANCED;
+            } else if (roleChanged || leaderChanged) {
+                event = AppendEntriesEvent.ACCEPTED_LEADER_DISCOVERED;
+            } else {
+                event = AppendEntriesEvent.ACCEPTED_IDEMPOTENT;
+            }
+
+            RaftStateSnapshot after = raftState.snapshot();
+            return new AppendEntriesOutcome(event, new StateTransition(before, after));
+        }
+    }
+
+    // ---------------------------------------------------------------- elections
+
     private void onElectionTimeout() {
         updateMdc();
         try {
             log.debug("election timeout");
-            if (raftState.getRole() == NodeRole.LEADER) {
-                electionTimer.reset();
-                return;
-            }
             startElection();
         } finally {
             clearMdc();
@@ -76,34 +193,55 @@ public class RaftNode {
     }
 
     private void startElection() {
-        updateMdc();
-        try {
-            int newTerm = raftState.startElection(raftProperties.getNodeId());
+        List<String> peers;
+        int electionTerm;
+        AtomicInteger votes = new AtomicInteger(1); // голос за себя
+        int majority;
+
+        synchronized (nodeLock) {
+            RaftStateSnapshot snapshot = raftState.snapshot();
+            if (snapshot.role() == NodeRole.LEADER) {
+                electionTimer.reset();
+                return;
+            }
+
+            electionTerm = raftState.startElection(raftProperties.getNodeId());
+            RaftStateSnapshot afterStart = raftState.snapshot();
+
+            // (1) повторная проверка перед мутацией роли/кампании
+            if (afterStart.currentTerm() != electionTerm
+                    || !Objects.equals(afterStart.votedFor(), raftProperties.getNodeId())) {
+                becomeFollowerLocked(afterStart.leaderId(), true);
+                return;
+            }
+
             raftState.setRole(NodeRole.CANDIDATE);
             raftState.setLeaderId(null);
             updateMdc();
-            log.info("starting election term={} (voted for self)", newTerm);
+            log.info("starting election term={} (voted for self)", electionTerm);
             electionTimer.reset();
 
-            List<String> peers = rpcClient.getPeers();
-            AtomicInteger votes = new AtomicInteger(1); // vote for self
-            int majority = majority(peers.size() + 1);
+            peers = rpcClient.getPeers();
+            majority = majority(peers.size() + 1);
 
-            // Кластер из одного узла (или узел-единственный доступный) не получит
-            // ни одного ответа, поэтому кворум нужно проверить до рассылки.
-            maybeBecomeLeader(votes, majority);
-
-            for (String peer : peers) {
-                RequestVoteRequest req = new RequestVoteRequest(newTerm, raftProperties.getNodeId());
-                rpcClient.requestVote(peer, req).thenAccept(resp -> {
-                    if (resp == null) {
-                        return;
-                    }
-                    handleRequestVoteResponse(peer, resp, votes, majority);
-                });
+            // Кластер из одного узла (или единственный доступный) не получит ответов,
+            // поэтому кворум проверяется до рассылки.
+            if (tryBecomeLeaderLocked(electionTerm, votes, majority)) {
+                return;
             }
-        } finally {
-            clearMdc();
+        }
+
+        // Сетевые вызовы — вне nodeLock. Один лог на раунд выборов (как для heartbeats),
+        // а не на каждый адресат; детали по пирам остаются в RaftRpcClient на DEBUG.
+        log.info("RequestVote sent term={} peers={}", electionTerm, peers.size());
+        for (String peer : peers) {
+            RequestVoteRequest req = new RequestVoteRequest(electionTerm, raftProperties.getNodeId());
+            rpcClient.requestVote(peer, req).thenAccept(resp -> {
+                if (resp == null) {
+                    return;
+                }
+                handleRequestVoteResponse(peer, resp, electionTerm, votes, majority);
+            });
         }
     }
 
@@ -111,68 +249,76 @@ public class RaftNode {
         return clusterSize / 2 + 1;
     }
 
-    private void maybeBecomeLeader(AtomicInteger votes, int majority) {
-        if (votes.get() >= majority) {
-            becomeLeader();
-        }
-    }
-
-    private synchronized void handleRequestVoteResponse(String peer, RequestVoteResponse resp, AtomicInteger votes, int majority) {
+    private void handleRequestVoteResponse(String peer, RequestVoteResponse resp, int electionTerm,
+                                           AtomicInteger votes, int majority) {
         updateMdc();
         try {
-            if (resp.getTerm() > raftState.getCurrentTerm()) {
-                log.info("stepping down (outgoing RequestVote response has higher term) newTerm={} from={}", resp.getTerm(), peer);
-                raftState.updateTermAndVote(resp.getTerm(), null);
-                raftState.setRole(NodeRole.FOLLOWER);
-                raftState.setLeaderId(null);
-                stopHeartbeats();
-                electionTimer.reset();
-                return;
-            }
-            if (raftState.getRole() != NodeRole.CANDIDATE) {
-                return;
-            }
-            if (raftState.getCurrentTerm() != resp.getTerm()) {
-                return;
-            }
-            if (resp.isVoteGranted()) {
-                int v = votes.incrementAndGet();
-                log.info("vote granted ({}/{}) from peer response from={}", v, majority, peer);
-                if (v >= majority) {
-                    becomeLeader();
+            synchronized (nodeLock) {
+                RaftStateSnapshot snapshot = raftState.snapshot();
+
+                if (resp.getTerm() > snapshot.currentTerm()) {
+                    log.info("stepping down (outgoing RequestVote response has higher term) newTerm={} from={}",
+                            resp.getTerm(), peer);
+                    raftState.updateTermAndVote(resp.getTerm(), null);
+                    becomeFollowerLocked(null, true);
+                    return;
                 }
-            } else {
-                log.debug("vote rejected from peer response from={}", peer);
+
+                // (4) контекст кампании: терм, роль и голос за себя
+                if (snapshot.currentTerm() != electionTerm || resp.getTerm() != electionTerm) {
+                    return;
+                }
+                if (snapshot.role() != NodeRole.CANDIDATE
+                        || !Objects.equals(snapshot.votedFor(), raftProperties.getNodeId())) {
+                    return;
+                }
+
+                if (resp.isVoteGranted()) {
+                    int v = votes.incrementAndGet();
+                    log.info("vote granted ({}/{}) from peer response from={}", v, majority, peer);
+                    tryBecomeLeaderLocked(electionTerm, votes, majority);
+                } else {
+                    log.debug("vote rejected from peer response from={}", peer);
+                }
             }
         } finally {
             clearMdc();
         }
     }
 
-    private synchronized void becomeLeader() {
-        if (raftState.getRole() != NodeRole.CANDIDATE) {
-            return;
+    /**
+     * (2) Переход в лидера с обязательной повторной проверкой легитимности.
+     *
+     * @return {@code true}, если узел стал лидером
+     */
+    private boolean tryBecomeLeaderLocked(int expectedTerm, AtomicInteger votes, int majority) {
+        if (votes.get() < majority) {
+            return false;
         }
+        RaftStateSnapshot snapshot = raftState.snapshot();
+        if (snapshot.role() != NodeRole.CANDIDATE
+                || snapshot.currentTerm() != expectedTerm
+                || !Objects.equals(snapshot.votedFor(), raftProperties.getNodeId())) {
+            return false;
+        }
+        raftState.setRole(NodeRole.LEADER);
+        raftState.setLeaderId(raftProperties.getNodeId());
         updateMdc();
-        try {
-            raftState.setRole(NodeRole.LEADER);
-            raftState.setLeaderId(raftProperties.getNodeId());
-            updateMdc();
-            log.info("became leader term={}", raftState.getCurrentTerm());
-            startHeartbeats();
-        } finally {
-            clearMdc();
-        }
+        log.info("became leader term={}", snapshot.currentTerm());
+        startHeartbeatsLocked();
+        return true;
     }
 
-    private synchronized void startHeartbeats() {
-        stopHeartbeats();
+    // ---------------------------------------------------------------- heartbeats
+
+    private void startHeartbeatsLocked() {
+        stopHeartbeatsLocked();
         long interval = raftProperties.getHeartbeatIntervalMs();
         heartbeatTask = heartbeatScheduler.scheduleWithFixedDelay(
                 this::sendHeartbeats, 0, interval, TimeUnit.MILLISECONDS);
     }
 
-    private synchronized void stopHeartbeats() {
+    private void stopHeartbeatsLocked() {
         ScheduledFuture<?> task = heartbeatTask;
         heartbeatTask = null;
         if (task != null) {
@@ -181,25 +327,32 @@ public class RaftNode {
     }
 
     private void sendHeartbeats() {
-        if (raftState.getRole() != NodeRole.LEADER) {
-            stopHeartbeats();
-            return;
+        AppendEntriesRequest req;
+        List<String> peers;
+        synchronized (nodeLock) {
+            RaftStateSnapshot snapshot = raftState.snapshot();
+            // (5) актуальность лидера/терма перед отправкой
+            if (snapshot.role() != NodeRole.LEADER) {
+                stopHeartbeatsLocked();
+                return;
+            }
+            req = new AppendEntriesRequest(snapshot.currentTerm(), raftProperties.getNodeId());
+            peers = rpcClient.getPeers();
         }
+
         updateMdc();
         try {
-            List<String> peers = rpcClient.getPeers();
-            int term = raftState.getCurrentTerm();
-            AppendEntriesRequest req = new AppendEntriesRequest(term, raftProperties.getNodeId());
+            int sendTerm = req.getTerm();
             int entriesCount = req.getEntries() == null ? 0 : req.getEntries().size();
             if (!peers.isEmpty()) {
-                log.info("AppendEntries sent term={} entries={} peers={}", term, entriesCount, peers.size());
+                log.info("AppendEntries sent term={} entries={} peers={}", sendTerm, entriesCount, peers.size());
             }
             for (String peer : peers) {
                 rpcClient.appendEntries(peer, req).thenAccept(resp -> {
                     if (resp == null) {
                         return;
                     }
-                    handleAppendEntriesResponse(resp);
+                    handleAppendEntriesResponse(resp, sendTerm);
                 });
             }
         } finally {
@@ -207,16 +360,37 @@ public class RaftNode {
         }
     }
 
-    private synchronized void handleAppendEntriesResponse(AppendEntriesResponse resp) {
-        if (raftState.getRole() != NodeRole.LEADER) {
-            return;
+    private void handleAppendEntriesResponse(AppendEntriesResponse resp, int leaderTermAtSend) {
+        updateMdc();
+        try {
+            synchronized (nodeLock) {
+                RaftStateSnapshot snapshot = raftState.snapshot();
+                // (5) ответ учитывается только для актуального лидерства/терма
+                if (snapshot.role() != NodeRole.LEADER || snapshot.currentTerm() != leaderTermAtSend) {
+                    return;
+                }
+                if (resp.getTerm() > snapshot.currentTerm()) {
+                    log.info("stepping down (outgoing AppendEntries response has higher term) newTerm={}", resp.getTerm());
+                    raftState.updateTermAndVote(resp.getTerm(), null);
+                    becomeFollowerLocked(null, true);
+                }
+            }
+        } finally {
+            clearMdc();
         }
-        if (resp.getTerm() > raftState.getCurrentTerm()) {
-            log.info("stepping down (outgoing AppendEntries response has higher term) newTerm={}", resp.getTerm());
-            raftState.updateTermAndVote(resp.getTerm(), null);
-            raftState.setRole(NodeRole.FOLLOWER);
-            raftState.setLeaderId(null);
-            stopHeartbeats();
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    /**
+     * Переводит узел в {@code FOLLOWER} с указанным лидером и останавливает heartbeats.
+     * Терм меняется только через атомарные операции {@link RaftState}.
+     */
+    private void becomeFollowerLocked(String leaderId, boolean resetTimer) {
+        raftState.setRole(NodeRole.FOLLOWER);
+        raftState.setLeaderId(leaderId);
+        stopHeartbeatsLocked();
+        if (resetTimer) {
             electionTimer.reset();
         }
     }
@@ -226,9 +400,10 @@ public class RaftNode {
             if (raftProperties != null) {
                 MDC.put("nodeId", raftProperties.getNodeId());
             }
-            if (raftState != null) {
-                MDC.put("term", String.valueOf(raftState.getCurrentTerm()));
-                MDC.put("role", String.valueOf(raftState.getRole()));
+            RaftStateSnapshot snapshot = raftState.snapshot();
+            MDC.put("term", String.valueOf(snapshot.currentTerm()));
+            if (snapshot.role() != null) {
+                MDC.put("role", String.valueOf(snapshot.role()));
             }
         } catch (Exception ignored) {
         }
@@ -245,7 +420,10 @@ public class RaftNode {
 
     @PreDestroy
     public void shutdown() {
-        electionTimer.stop();
-        heartbeatScheduler.shutdownNow();
+        synchronized (nodeLock) {
+            electionTimer.stop();
+            stopHeartbeatsLocked();
+            heartbeatScheduler.shutdownNow();
+        }
     }
 }

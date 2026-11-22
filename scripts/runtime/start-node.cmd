@@ -43,6 +43,9 @@ if defined ERR (
 rem ---- parse extra jvm args (--jvm "...") ----
 rem Everything after --jvm / --jvm-args is treated as JVM options. This also
 rem keeps flags working when they are forwarded unquoted by start-cluster.cmd.
+rem C1-only JIT is enough for heartbeats and cuts startup time roughly in half.
+rem Extra --jvm flags go after this, so they can override the default.
+set "JVM_DEFAULT=-XX:TieredStopAtLevel=1"
 set "JVM_EXTRA="
 set "DRY_RUN="
 shift & shift & shift
@@ -163,18 +166,19 @@ echo Running peers: %RUNNING%/%PEER_TOTAL%
 
 if not defined DRY_RUN goto :do_start
 echo Command:
-if defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS%%JVM_EXTRA% -jar "%JAR%"
-if not defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE%%JVM_EXTRA% -jar "%JAR%"
+if defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS% %JVM_DEFAULT%%JVM_EXTRA% -jar "%JAR%"
+if not defined PEERS echo   "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% %JVM_DEFAULT%%JVM_EXTRA% -jar "%JAR%"
 echo Dry run: node was not started.
 popd >nul
 exit /b 0
 
 :do_start
-if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
+rem Do not create DATA_DIR here: in-memory mode needs no files/directory.
+rem FileRaftStorage creates the parent directory itself on first persist (file mode only).
 if defined PEERS (
-  start "raft-node-%NODE%" "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS% %JVM_EXTRA% -jar "%JAR%"
+  start "raft-node-%NODE%" "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% -Dcluster.peers=%PEERS% %JVM_DEFAULT%%JVM_EXTRA% -jar "%JAR%"
 ) else (
-  start "raft-node-%NODE%" "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% %JVM_EXTRA% -jar "%JAR%"
+  start "raft-node-%NODE%" "%JAVA_BIN%" -Dserver.port=%PORT% -Draft.node-id=node-%NODE% -Draft.storage-path=%STATE% %JVM_DEFAULT%%JVM_EXTRA% -jar "%JAR%"
 )
 
 echo Status: curl http://localhost:%PORT%/status

@@ -1,6 +1,8 @@
 package com.myraft.raft.rpc;
 
+import com.myraft.config.ClusterProperties;
 import com.myraft.config.RaftProperties;
+import com.myraft.raft.RaftNode;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.rpc.dto.AppendEntriesRequest;
@@ -10,6 +12,7 @@ import com.myraft.raft.rpc.dto.RequestVoteResponse;
 import com.myraft.raft.storage.InMemoryRaftStorage;
 import com.myraft.raft.timer.ElectionTimer;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,10 +37,16 @@ class RaftRpcServiceAtomicityTest {
         return p;
     }
 
+    private static RaftRpcService newService(RaftState state, RaftProperties props) {
+        RaftRpcClient client = new RaftRpcClient(new RestTemplate(), new ClusterProperties());
+        RaftNode node = new RaftNode(state, props, client, new ElectionTimer(props));
+        return new RaftRpcService(node, state, props);
+    }
+
     @Test
     void concurrentHandleRequestVoteGrantsExactlyOnce() throws Exception {
         RaftState state = new RaftState(new InMemoryRaftStorage());
-        RaftRpcService service = new RaftRpcService(state, props("node-1"), new ElectionTimer(props("node-1")));
+        RaftRpcService service = newService(state, props("node-1"));
 
         int threads = 2;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -104,7 +113,7 @@ class RaftRpcServiceAtomicityTest {
     void staleAppendEntriesDoesNotChangeVote() {
         RaftState state = new RaftState(new InMemoryRaftStorage());
         state.updateTermAndVote(5, "node-v");
-        RaftRpcService service = new RaftRpcService(state, props("node-1"), new ElectionTimer(props("node-1")));
+        RaftRpcService service = newService(state, props("node-1"));
 
         AppendEntriesResponse resp = service.handleAppendEntries(new AppendEntriesRequest(3, "old-leader"));
 

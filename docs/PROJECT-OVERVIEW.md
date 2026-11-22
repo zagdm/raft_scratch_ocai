@@ -18,7 +18,7 @@
 
 ## Сборка, запуск, тесты
 - Сборка: `mvn clean package -DskipTests` (или `scripts\runtime\build-jar.cmd`).
-- Тесты: `mvn test` — **13/13, BUILD SUCCESS** (текущий набор: `StatusResponseJsonTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`).
+- Тесты: `mvn test` — **19/19, BUILD SUCCESS** (текущий набор: `MyRaftApplicationTests` (`@SpringBootTest`), `StatusResponseJsonTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.rpc.RaftRpcOutcomeTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`).
 - Запуск кластера: `scripts\runtime\start-cluster.cmd [total-nodes] [base-port] [--jvm "..."]` (цикл вызовов `start-node.cmd`).
 - Запуск узла: `scripts\runtime\start-node.cmd <node> [total-nodes] [base-port] [--jvm "..."]`.
 - Остановка: `scripts\runtime\stop-cluster.cmd` (закрытие окна узла также останавливает узел).
@@ -28,7 +28,9 @@
 - Хранилище: in-memory по умолчанию (состояние не переживает перезапуск); файловый режим включается `-Draft.storage.type=file` (`raft.storage-path`, напр. `data/node-N.json`).
 - Состояние Raft: персистятся только `currentTerm` и `votedFor`.
 - Атомарность term/vote (F1/F2): `RaftState.startElection`/`grantVote` и монотонный `updateTermAndVote` выполняются под write-lock с persist-before-visible; `RaftRpcService`/`RaftNode` используют атомарные решения/возвращаемый терм, предотвращая двойное голосование в терме и откат терма.
-- Логирование: консоль, MDC `[node/term/role]`, события `RequestVote`/`AppendEntries` отправки, приёма и ответов.
+- Атомарность переходов узла: единый `nodeLock` в `RaftNode` сериализует `role`/`leaderId`/таймер/heartbeats и обработку входящих RPC и ответов; сеть — вне лока. Порядок блокировок: `nodeLock` → лок `RaftState`. `RaftRpcService` — тонкий адаптер (snapshot-prefilter'ы stale term / already voted / foreign leader, уточнение `GRANTED_REPEAT`, логирование outcome, ответ из `after`-снапшота); сброс таймера при повторном голосе выполняется узлом под `nodeLock`.
+- `AppendEntries` при равном терме от другого лидера (если текущий `leaderId` известен) не принимается — `REJECTED_FOREIGN_LEADER`; heartbeat от известного лидера и более высокий терм принимаются как раньше.
+- Логирование: консоль, MDC `[node/term/role]`; события: `starting election`, `RequestVote sent term=... peers=N` (один раз за раунд; детали по пирам — DEBUG в `RaftRpcClient`), `vote granted`, `became leader`, `stepping down`, `vote rejected`, `leader changed`/`discovered new leader`, `AppendEntries sent`, `AppendEntries received`, ответы/игнорирование heartbeat.
 
 ## Окружение и эксплуатационные заметки
 - Основное окружение разработки/проверок — Windows 10, JDK 21, Maven из IntelliJ (часто запускается из WSL через `powershell.exe`), пути с кириллицей/пробелами требуют аккуратных команд (см. `docs/ENVIRONMENT.md`).

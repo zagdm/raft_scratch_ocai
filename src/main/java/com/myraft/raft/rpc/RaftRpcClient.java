@@ -36,7 +36,7 @@ public class RaftRpcClient {
                 MDC.clear();
             }
             try {
-                log.info("RequestVote sent -> {} term={}", peer, request.getTerm());
+                log.debug("RequestVote sent -> {} term={}", peer, request.getTerm());
                 RequestVoteResponse response = restTemplate.postForObject(url, request, RequestVoteResponse.class);
                 log.debug("RequestVote response from {} term={} granted={}", peer, response == null ? -1 : response.getTerm(), response == null ? null : response.isVoteGranted());
                 return response;

@@ -69,7 +69,7 @@ cmd.exe /c "cd /d C:\temp\myraft-build && \"C:\Program Files\JetBrains\IntelliJ 
 | Каталог | Назначение |
 |---|---|
 | `target/` | сборка; `my-raft-0.0.1-SNAPSHOT.jar` (~20 МБ) + `.original` |
-| `data/` | состояние узлов `node-1.json … node-N.json` (создаётся скриптами; в репозитории отсутствует) |
+| `data/` | состояние узлов `node-1.json … node-N.json` только в файловом режиме; скрипты каталог не создают, его создаёт `FileRaftStorage` при первой записи; в in-memory режиме папка не появляется |
 
 ## 6. Кодировки и файлы скриптов
 
@@ -178,3 +178,23 @@ C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\runtime\start-node.cmd 2 3 18080
 # 5. Остановка всего
 C:\Users\BCC9~1\IdeaProjects\my-raft\scripts\runtime\stop-cluster.cmd
 ```
+
+## 11. Время старта кластера
+
+Замер: 3 узла на 18080-18082, от запуска JVM до ответа `GET /status` на всех трёх узлах
+(опрос раз в секунду), 3 прогона на конфигурацию, медиана.
+
+| Конфигурация | Медиана, с | Старт одного узла (`Started MyRaftApplication in ...`), с |
+|---|---|---|
+| Исходный JAR, без флагов | 39.6 | 25.4 / 26.2 / 30.2 |
+| После уборки (без `@EnableScheduling`, banner/JMX off), без флагов | 39.1 | 25.6 / 26.1 / 29.6 |
+| С `-XX:TieredStopAtLevel=1` | 20.2 | 12.8 / 13.1 / 13.3 |
+
+Вывод: уборка кода/конфигурации сама по себе эффекта не дала; весь выигрыш (~2×) даёт
+`-XX:TieredStopAtLevel=1` (только C1 JIT — для heartbeats и выборов достаточно). Флаг задан
+по умолчанию в `start-node.cmd`, передача `--jvm "-XX:TieredStopAtLevel=4"` переопределяет его.
+Heap/GC-флаги (`-Xms64m -Xmx128m`, `-XX:+UseSerialGC`) и `-XX:ActiveProcessorCount=2` дали
+результат в пределах шума, поэтому не добавлены.
+
+`spring.main.banner-mode=off` и `spring.jmx.enabled=false` заданы в `application.yml` — это
+уборка лишней работы при старте, на время старта измеримо не влияет.

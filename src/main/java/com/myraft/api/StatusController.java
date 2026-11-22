@@ -4,6 +4,7 @@ import com.myraft.api.dto.StatusResponse;
 import com.myraft.config.RaftProperties;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
+import com.myraft.raft.model.RaftState.RaftStateSnapshot;
 import com.myraft.raft.rpc.RaftRpcClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,22 +27,26 @@ public class StatusController {
         this.rpcClient = rpcClient;
     }
 
+    /**
+     * Ответ строится из одного согласованного снапшота {@link RaftState} (read-lock),
+     * без захвата лока узла.
+     */
     @GetMapping("/status")
     public StatusResponse status() {
-        updateMdc();
+        RaftStateSnapshot snapshot = raftState.snapshot();
+        updateMdc(snapshot);
         try {
-            NodeRole role = raftState.getRole();
-            long uptimeMs = System.currentTimeMillis() - raftState.getStartTime();
+            long uptimeMs = System.currentTimeMillis() - snapshot.startTime();
             long seconds = TimeUnit.MILLISECONDS.toSeconds(uptimeMs);
             String uptime = seconds + "s";
             log.debug("status request");
             return new StatusResponse(
                     raftProperties.getNodeId(),
-                    role.name(),
-                    raftState.getCurrentTerm(),
-                    raftState.getLeaderId(),
+                    snapshot.role() == null ? null : snapshot.role().name(),
+                    snapshot.currentTerm(),
+                    snapshot.leaderId(),
                     rpcClient.getPeers(),
-                    role == NodeRole.LEADER,
+                    snapshot.role() == NodeRole.LEADER,
                     uptime
             );
         } finally {
@@ -49,15 +54,15 @@ public class StatusController {
         }
     }
 
-    private void updateMdc() {
+    private void updateMdc(RaftStateSnapshot snapshot) {
         try {
             if (raftProperties != null) {
                 MDC.put("nodeId", raftProperties.getNodeId());
             }
-            if (raftState != null) {
-                MDC.put("term", String.valueOf(raftState.getCurrentTerm()));
-                if (raftState.getRole() != null) {
-                    MDC.put("role", String.valueOf(raftState.getRole()));
+            if (snapshot != null) {
+                MDC.put("term", String.valueOf(snapshot.currentTerm()));
+                if (snapshot.role() != null) {
+                    MDC.put("role", String.valueOf(snapshot.role()));
                 }
             }
         } catch (Exception ignored) {
