@@ -62,7 +62,7 @@ cmd.exe /c "cd /d C:\temp\myraft-build && \"C:\Program Files\JetBrains\IntelliJ 
 искажается, поэтому в командах используется короткий путь `C:\Users\BCC9~1\...`.
 Сам каталог проекта (`my-raft`) — ASCII, короткое имя не требуется.
 
-Проект находится в git-репозитории (ветка `main`); удалённые операции выполняются только по явному запросу.
+Проект находится в git-репозитории (текущая ветка `feature/log-replication-stage1`, origin: `https://github.com/zagdm/raft_scratch_ocai.git`); удалённые операции выполняются только по явному запросу.
 
 ## 5. Каталоги, создаваемые при работе
 
@@ -147,6 +147,8 @@ powershell.exe -NoProfile -Command "Set-Location 'C:\temp\myraft-build'; & 'C:\P
 ```
 
 Суть: минимальное количество слоёв (`WSL -> powershell -> mvn.cmd`), ASCII-путь, корректные кавычки. Вывод `cmd/powershell` может требоваться в `iconv -f cp866 -t utf-8`, но сам запуск должен идти именно так.
+
+Проверенный вариант без копирования проекта: `Set-Location 'C:\Users\BCC9~1\IdeaProjects\my-raft'` — короткий 8.3-путь одновременно обходит и UNC, и кириллицу, поэтому тесты и сборка идут прямо из рабочей копии. ASCII-копия `C:\temp\myraft-build` остаётся запасным вариантом.
 
 ## 9. Порты
 

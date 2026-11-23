@@ -18,13 +18,13 @@
 
 ## Сборка, запуск, тесты
 - Сборка: `mvn clean package -DskipTests` (или `scripts\runtime\build-jar.cmd`).
-- Тесты: `mvn test` — **68/68, BUILD SUCCESS** (19 исходных + 16 этапа 1 + 15 этапа 2 + 5 этапа 3 + 5 этапа 4 + 3 плана отказоустойчивости + 5 расширения клиентских тестов). Новые плана отказоустойчивости (`docs/TEST-PLAN.md`): гибель лидера и возврат старого, гибель фолловера и догон лога, перезапуск с `FileRaftStorage` (term/vote/лог сохраняются, commit/lastApplied нет). Расширение клиентских тестов: `503` без лидера, `504` apply-timeout и догон после рестарта, `found=false` против JSON `null`, `/raft/log` после смены лидера, round-trip JSON-типов. Сборка: `mvn clean package -DskipTests` — BUILD SUCCESS.
+- Тесты: `mvn test` — **68/68, BUILD SUCCESS** (17 классов, детали — в `docs/TEST-CONTEXT.md`): выборы и свежесть лога, атомарность term/vote и переходов узла, репликация и коммит по большинству, конфликты лога и догон отставшего узла, apply, отказоустойчивость (гибель лидера/фолловера, рестарт с `FileRaftStorage`), клиентский REST API (`503`, `504`, JSON `null`, round-trip типов). Сборка: `mvn clean package -DskipTests` — BUILD SUCCESS.
 - Запуск кластера: `scripts\runtime\start-cluster.cmd [total-nodes] [base-port] [--jvm "..."]` (цикл вызовов `start-node.cmd`).
 - Запуск узла: `scripts\runtime\start-node.cmd <node> [total-nodes] [base-port] [--jvm "..."]`.
 - Остановка: `scripts\runtime\stop-cluster.cmd` (закрытие окна узла также останавливает узел).
 
 ## Конфигурация и поведение
-- Таймауты/интервалы (по умолчанию): election `5000-8000ms`, heartbeat `1000ms`, RPC `RestTemplate` `200ms`.
+- Таймауты/интервалы (по умолчанию из `application.yml`): election `500-700ms`, heartbeat `100ms`, RPC `RestTemplate` `200ms`, ожидание apply клиентом `5000ms`.
 - Хранилище: in-memory по умолчанию (состояние не переживает перезапуск); файловый режим включается `-Draft.storage.type=file` (`raft.storage-path`, напр. `data/node-N.json`).
 - Состояние Raft: персистятся `currentTerm`, `votedFor` и реплицируемый лог (`formatVersion=2`); `commitIndex`/`lastApplied`/роль/`leaderId`/`nextIndex`/`matchIndex` **не** восстанавливаются (volatile, по Figure 2).
 - Атомарность term/vote (F1/F2): `RaftState.startElection`/`grantVote` и монотонный `updateTermAndVote` выполняются под write-lock с persist-before-visible; `RaftRpcService`/`RaftNode` используют атомарные решения/возвращаемый терм, предотвращая двойное голосование в терме и откат терма.
@@ -36,4 +36,4 @@
 
 ## Окружение и эксплуатационные заметки
 - Основное окружение разработки/проверок — Windows 10, JDK 21, Maven из IntelliJ (часто запускается из WSL через `powershell.exe`), пути с кириллицей/пробелами требуют аккуратных команд (см. `docs/ENVIRONMENT.md`).
-- Процедура инфраструктурной проверки запуска/восстановления узлов описана в `docs/TEST-CONTEXT.md`. Следует учитывать задержки, связанные с увеличенными election/heartbeat таймаутами.
+- `docs/TEST-CONTEXT.md` описывает Maven-тесты (68 тестов, без реальных процессов и портов). Ручная проверка запуска/восстановления узлов не входит в `mvn test`; команды — в `docs/ENVIRONMENT.md` (§10).

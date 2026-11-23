@@ -53,8 +53,8 @@ Maven в PATH отсутствует; на этой машине использ�
 | `raft.storage.FileRaftStorageTest` | 5 | запись/чтение файла, перезапись, лог вместе с term/vote, fail-fast на отсутствии/старом/неизвестном `formatVersion` |
 | `raft.storage.FileRaftStorageRestartTest` | 1 | рестарт: term/vote/лог и `formatVersion=2` восстанавливаются, `commitIndex`/`lastApplied`/роль/`leaderId` сбрасываются |
 
-Итого 68 тестов в 17 классах. Сценарии отказоустойчивости и план расширения клиентских тестов
-описаны в `docs/TEST-PLAN.md`.
+Итого 68 тестов в 17 классах. Отказоустойчивость и клиентский REST API покрываются тестами
+`RaftReplicationTest`, `FileRaftStorageRestartTest` и `RaftClientApiTest`.
 
 ## Что не покрывается Maven-тестами
 

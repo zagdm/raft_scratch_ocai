@@ -3,16 +3,16 @@
 Актуальный снимок реализации (Raft с выборами лидера, моделью лога и персистентностью, абстрактной
 state machine с KV-конкретизацией, репликацией/коммитом и внутренним REST API записи/чтения — этапы 1–4,
 Spring Boot 3.3.5, Java 21). Документ фиксирует **контракты ключевых классов в текущем коде**,
-включая ответственность за атомарность/конкурентность. План реализованных этапов —
-`docs/LOG-REPLICATION-PLAN.md`; целевой внешний контракт `docs/client_openapi.json` не реализован.
+включая ответственность за атомарность/конкурентность. Целевой внешний контракт
+`docs/client_openapi.json` не реализован.
 
 ## Стек и структура
 - Java 21, Spring Boot 3.3.5, Maven (`spring-boot-starter-web`, `spring-boot-configuration-processor`, `spring-boot-starter-test`).
 - Основные пакеты: `api`, `config`, `raft.model`, `raft.fsm`, `raft.fsm.kv`, `raft.rpc`, `raft.rpc.dto`, `raft.storage`, `raft.timer`, `raft` (`RaftNode`).
-- Конфигурация (`application.yml`, по умолчанию): `raft.election-timeout-min-ms=5000`, `raft.election-timeout-max-ms=8000`, `raft.heartbeat-interval-ms=1000`, `raft.storage-path=data/raft-state.json`, `raft.client.apply-timeout-ms=5000`, `RestTemplate` connect/read `200ms`.
-- Тесты: `mvn test` — 68 тестов, BUILD SUCCESS (19 исходных + 16 этапа 1 + 15 этапа 2 + 5 этапа 3 + 5 этапа 4 + 3 плана отказоустойчивости + 5 расширения клиентских тестов): `MyRaftApplicationTests` (`@SpringBootTest` contextLoads), `StatusResponseJsonTest`, `api.RaftClientApiTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.RaftNodeApplyTest`, `raft.RaftReplicationTest`, `raft.rpc.RaftRpcOutcomeTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`, `raft.storage.FileRaftStorageRestartTest`, `raft.model.RaftLogTest`, `raft.model.RaftCommandJsonTest`, `raft.fsm.kv.KvStateMachineTest`, `raft.rpc.RaftVoteFreshnessTest`, `raft.rpc.dto.RaftDtoJsonTest`.
-- Тесты отказоустойчивости (`docs/TEST-PLAN.md`): `RaftReplicationTest` расширен сценариями гибели лидера/фолловера и перезапуска узла поверх того же `RaftStorage`; `FileRaftStorageRestartTest` проверяет восстановление term/vote/лога и сброс volatile-полей.
-- Клиентские тесты (`docs/TEST-PLAN.md`): `RaftClientApiTest` расширен проверками `503` без лидера, `504` apply-timeout с незакоммиченной записью и догоном после рестарта, `found=false` против JSON `null`, `/raft/log` после смены лидера/рестарта и round-trip JSON-типов. Production-код не затрагивается.
+- Конфигурация (`application.yml`, по умолчанию): `raft.election-timeout-min-ms=500`, `raft.election-timeout-max-ms=700`, `raft.heartbeat-interval-ms=100`, `raft.storage-path=data/raft-state.json`, `raft.client.apply-timeout-ms=5000`, `RestTemplate` connect/read `200ms`.
+- Тесты: `mvn test` — 68 тестов, BUILD SUCCESS (17 классов; 19 исходных + 16 этапа 1 + 15 этапа 2 + 5 этапа 3 + 5 этапа 4 + 3 отказоустойчивости + 5 клиентских): `MyRaftApplicationTests` (`@SpringBootTest` contextLoads), `StatusResponseJsonTest`, `api.RaftClientApiTest`, `RaftElectionTest`, `RaftNodeElectionTest`, `RaftStateAtomicityTest`, `raft.RaftNodeApplyTest`, `raft.RaftReplicationTest`, `raft.rpc.RaftRpcOutcomeTest`, `raft.rpc.RaftRpcServiceAtomicityTest`, `FileRaftStorageTest`, `raft.storage.FileRaftStorageRestartTest`, `raft.model.RaftLogTest`, `raft.model.RaftCommandJsonTest`, `raft.fsm.kv.KvStateMachineTest`, `raft.rpc.RaftVoteFreshnessTest`, `raft.rpc.dto.RaftDtoJsonTest`.
+- Тесты отказоустойчивости: `RaftReplicationTest` расширен сценариями гибели лидера/фолловера и перезапуска узла поверх того же `RaftStorage`; `FileRaftStorageRestartTest` проверяет восстановление term/vote/лога и сброс volatile-полей.
+- Клиентские тесты: `RaftClientApiTest` расширен проверками `503` без лидера, `504` apply-timeout с незакоммиченной записью и догоном после рестарта, `found=false` против JSON `null`, `/raft/log` после смены лидера/рестарта и round-trip JSON-типов. Production-код не затрагивается.
 
 ## Контракты ключевых классов
 
