@@ -62,7 +62,7 @@ cmd.exe /c "cd /d C:\temp\myraft-build && \"C:\Program Files\JetBrains\IntelliJ 
 искажается, поэтому в командах используется короткий путь `C:\Users\BCC9~1\...`.
 Сам каталог проекта (`my-raft`) — ASCII, короткое имя не требуется.
 
-Проект находится в git-репозитории (текущая ветка `feature/log-replication-stage1`, origin: `https://github.com/zagdm/raft_scratch_ocai.git`); удалённые операции выполняются только по явному запросу.
+Проект находится в git-репозитории (текущая ветка `feature/raft-replication-and-api`, origin: `https://github.com/zagdm/raft_scratch_ocai.git`); удалённые операции выполняются только по явному запросу.
 
 ## 5. Каталоги, создаваемые при работе
 
