@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 @Component
@@ -153,6 +154,27 @@ public class RaftState {
         lock.writeLock().lock();
         try {
             RaftLog next = raftLog.append(entry);
+            persistLocked(currentTerm, votedFor, next);
+            raftLog = next;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Добавляет пачку записей одной персистентной операцией: лог не должен быть
+     * видим частично обновлённым, если репликация пришла батчем.
+     */
+    public void appendLogEntries(List<LogEntry> entries) {
+        if (entries == null || entries.isEmpty()) {
+            return;
+        }
+        lock.writeLock().lock();
+        try {
+            RaftLog next = raftLog;
+            for (LogEntry entry : entries) {
+                next = next.append(entry);
+            }
             persistLocked(currentTerm, votedFor, next);
             raftLog = next;
         } finally {

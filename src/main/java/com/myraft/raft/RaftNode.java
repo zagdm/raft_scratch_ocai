@@ -2,10 +2,12 @@ package com.myraft.raft;
 
 import com.myraft.config.RaftProperties;
 import com.myraft.raft.fsm.ApplyResult;
+import com.myraft.raft.fsm.Command;
 import com.myraft.raft.fsm.StateMachine;
 import com.myraft.raft.model.AppendEntriesEvent;
 import com.myraft.raft.model.AppendEntriesOutcome;
 import com.myraft.raft.model.LogEntry;
+import com.myraft.raft.model.NoOpCommand;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftCommand;
 import com.myraft.raft.model.RaftLog;
@@ -28,6 +30,7 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -59,6 +62,14 @@ public class RaftNode {
 
     /** Результаты apply по индексу; ожидающие клиенты появятся на этапе 4. */
     private final Map<Long, ApplyResult<?>> appliedResults = new HashMap<>();
+
+    /**
+     * Состояние репликации лидера: только под {@link #nodeLock}, сбрасывается при
+     * потере лидерства и инициализируется заново при каждом переходе в LEADER.
+     */
+    private final Map<String, Long> nextIndex = new HashMap<>();
+    private final Map<String, Long> matchIndex = new HashMap<>();
+
     private final ScheduledExecutorService heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "raft-heartbeat");
         t.setDaemon(true);
@@ -168,9 +179,9 @@ public class RaftNode {
     }
 
     /**
-     * Обрабатывает входящий {@code AppendEntries} (в этой реализации — heartbeat).
-     * Терм проверяется повторно под {@code nodeLock}; лидер принимается только при
-     * актуальном терме запроса.
+     * Обрабатывает входящий {@code AppendEntries}: heartbeat и репликацию лога.
+     * Терм и лидер принимаются по §5.1, затем проверяется согласованность лога по §5.3.
+     * Все мутации выполняются под {@code nodeLock}.
      */
     public AppendEntriesOutcome handleAppendEntries(AppendEntriesRequest request) {
         synchronized (nodeLock) {
@@ -180,7 +191,7 @@ public class RaftNode {
                         new StateTransition(before, before));
             }
             // При равном терме уже известный лидер не сменяется: второй лидер в том же
-            // терме — признак рассинхрона/старого сообщения, heartbeat не принимаем.
+            // терме — признак рассинхрона/старого сообщения, запрос не принимаем.
             if (request.getTerm() == before.currentTerm()
                     && before.leaderId() != null
                     && !Objects.equals(before.leaderId(), request.getLeaderId())) {
@@ -198,26 +209,117 @@ public class RaftNode {
             // updateTermAndVote меняет только term/vote, поэтому role/leaderId из before актуальны.
             becomeFollowerLocked(request.getLeaderId(), true);
 
+            RaftLog localLog = raftState.logSnapshot();
+            long prevLogIndex = request.getPrevLogIndex();
+            int prevLogTerm = request.getPrevLogTerm();
+            if (prevLogIndex > localLog.lastIndex()
+                    || (prevLogIndex > 0 && localLog.termAt(prevLogIndex) != prevLogTerm)) {
+                int conflictTerm = prevLogIndex <= localLog.lastIndex()
+                        ? localLog.termAt(prevLogIndex) : 0;
+                long conflictIndex = conflictTerm > 0
+                        ? firstIndexWithTerm(localLog, conflictTerm) : localLog.lastIndex() + 1;
+                RaftStateSnapshot after = raftState.snapshot();
+                return new AppendEntriesOutcome(AppendEntriesEvent.REJECTED_LOG_MISMATCH,
+                        new StateTransition(before, after),
+                        new AppendEntriesOutcome.Details(0, false, 0, conflictTerm, conflictIndex));
+            }
+
+            List<LogEntry> entries = request.getEntries() == null ? List.of() : request.getEntries();
+            AppendEntriesMutation mutation = appendEntriesLocked(prevLogIndex, entries);
+            advanceFollowerCommitLocked(request.getLeaderCommit(), mutation.lastNewIndex());
+
             AppendEntriesEvent event;
             if (termAdvanced) {
                 event = AppendEntriesEvent.ACCEPTED_TERM_ADVANCED;
             } else if (roleChanged || leaderChanged) {
                 event = AppendEntriesEvent.ACCEPTED_LEADER_DISCOVERED;
+            } else if (mutation.appended() > 0) {
+                event = mutation.truncated()
+                        ? AppendEntriesEvent.ACCEPTED_LOG_TRUNCATED
+                        : AppendEntriesEvent.ACCEPTED_LOG_APPENDED;
             } else {
                 event = AppendEntriesEvent.ACCEPTED_IDEMPOTENT;
             }
 
             RaftStateSnapshot after = raftState.snapshot();
-            return new AppendEntriesOutcome(event, new StateTransition(before, after));
+            return new AppendEntriesOutcome(event, new StateTransition(before, after),
+                    new AppendEntriesOutcome.Details(mutation.appended(), mutation.truncated(),
+                            mutation.lastNewIndex(), 0, 0));
         }
+    }
+
+    /** Копия лога после применения батча: число новых записей, факт truncate и последний индекс. */
+    private record AppendEntriesMutation(int appended, boolean truncated, long lastNewIndex) {
+    }
+
+    /**
+     * Дописывает записи после проверенного {@code prevLog*}. Записи с тем же индексом
+     * и термом считаются уже реплицированными; первый же конфликт удаляет хвост лога.
+     */
+    private AppendEntriesMutation appendEntriesLocked(long prevLogIndex, List<LogEntry> entries) {
+        RaftLog current = raftState.logSnapshot();
+        // По умолчанию все записи уже реплицированы; firstNew сдвигается только
+        // на первую отсутствующую/конфликтующую запись (идемпотентность повторов).
+        int firstNew = entries.size();
+        boolean truncated = false;
+
+        for (int i = 0; i < entries.size(); i++) {
+            LogEntry incoming = entries.get(i);
+            long expectedIndex = prevLogIndex + 1L + i;
+            if (incoming.index() != expectedIndex) {
+                throw new IllegalArgumentException("AppendEntries batch must be contiguous: expected index "
+                        + expectedIndex + " but got " + incoming.index());
+            }
+            LogEntry existing = current.entryAt(expectedIndex);
+            if (existing == null) {
+                firstNew = i;
+                break;
+            }
+            if (existing.term() != incoming.term()) {
+                current = current.truncateFrom(expectedIndex);
+                raftState.truncateLogFrom(expectedIndex);
+                truncated = true;
+                firstNew = i;
+                break;
+            }
+        }
+
+        List<LogEntry> toAppend = entries.subList(firstNew, entries.size());
+        raftState.appendLogEntries(toAppend);
+        long lastNewIndex = entries.isEmpty()
+                ? raftState.lastLogIndex() : entries.get(entries.size() - 1).index();
+        return new AppendEntriesMutation(toAppend.size(), truncated, lastNewIndex);
+    }
+
+    /** Верхняя граница коммита от лидера: последняя новая запись или конец лога для heartbeat. */
+    private void advanceFollowerCommitLocked(long leaderCommit, long lastNewIndex) {
+        if (leaderCommit <= raftState.getCommitIndex()) {
+            return;
+        }
+        long oldCommit = raftState.getCommitIndex();
+        raftState.advanceCommitIndex(Math.min(leaderCommit, lastNewIndex));
+        long newCommit = raftState.getCommitIndex();
+        if (newCommit > oldCommit) {
+            log.info("commitIndex advanced from={} to={} leaderCommit={}", oldCommit, newCommit, leaderCommit);
+            applyCommittedSafelyLocked();
+        }
+    }
+
+    private static long firstIndexWithTerm(RaftLog snapshot, int term) {
+        for (LogEntry entry : snapshot.entries()) {
+            if (entry.term() == term) {
+                return entry.index();
+            }
+        }
+        return snapshot.lastIndex() + 1;
     }
 
     // ---------------------------------------------------------------- apply
 
     /**
      * Применяет закоммиченные записи к state machine под {@code nodeLock}.
-     * Продвижение {@code commitIndex} по большинству появится на этапе 3;
-     * пока тесты задают его через {@code RaftState.advanceCommitIndex}.
+     * Ошибка apply не гасит RPC/колбэк: указатель остаётся на месте, повтор будет
+     * сделан при следующем изменении {@code commitIndex}.
      */
     public void applyCommittedEntries() {
         updateMdc();
@@ -262,6 +364,15 @@ public class RaftNode {
             }
             raftState.advanceLastApplied(next);
             lastApplied = next;
+        }
+    }
+
+    private void applyCommittedSafelyLocked() {
+        try {
+            applyCommittedLocked();
+        } catch (RuntimeException e) {
+            log.error("apply failed commitIndex={} lastApplied={}",
+                    raftState.getCommitIndex(), raftState.getLastApplied(), e);
         }
     }
 
@@ -395,17 +506,101 @@ public class RaftNode {
         raftState.setLeaderId(raftProperties.getNodeId());
         updateMdc();
         log.info("became leader term={}", snapshot.currentTerm());
+        initReplicationLocked();
+        appendNoOpLocked(snapshot.currentTerm());
+        maybeCommitLocked();
         startHeartbeatsLocked();
         return true;
     }
 
-    // ---------------------------------------------------------------- heartbeats
+    private void initReplicationLocked() {
+        nextIndex.clear();
+        matchIndex.clear();
+        // nextIndex указывает на первую запись, которой у пира, скорее всего, нет:
+        // NoOp лидера будет дописан сразу после этой инициализации.
+        long firstMissing = raftState.lastLogIndex() + 1;
+        for (String peer : rpcClient.getPeers()) {
+            nextIndex.put(peer, firstMissing);
+            matchIndex.put(peer, 0L);
+        }
+    }
+
+    private void appendNoOpLocked(int term) {
+        long index = raftState.lastLogIndex() + 1;
+        raftState.appendLogEntry(new LogEntry(index, term, new NoOpCommand()));
+        log.info("no-op entry appended index={} term={}", index, term);
+    }
+
+    /**
+     * Добавляет пользовательскую команду в лог лидера (ядро Raft без REST-адаптера).
+     *
+     * @return индекс новой записи или {@code -1}, если узел не лидер
+     */
+    public long appendUserCommand(Command command) {
+        Objects.requireNonNull(command, "command");
+        updateMdc();
+        try {
+            synchronized (nodeLock) {
+                if (raftState.getRole() != NodeRole.LEADER) {
+                    return -1;
+                }
+                int term = raftState.getCurrentTerm();
+                long index = raftState.lastLogIndex() + 1;
+                raftState.appendLogEntry(new LogEntry(index, term, new UserCommand(command)));
+                log.info("log entry appended index={} term={} type=user", index, term);
+                maybeCommitLocked();
+                return index;
+            }
+        } finally {
+            clearMdc();
+        }
+    }
+
+    /**
+     * Коммит только записей текущего терма: старые записи покрываются косвенно,
+     * когда большинство реплицировало NoOp/новую запись этого терма (§5.4.2).
+     */
+    private void maybeCommitLocked() {
+        if (raftState.getRole() != NodeRole.LEADER) {
+            return;
+        }
+        RaftLog snapshot = raftState.logSnapshot();
+        List<String> peers = rpcClient.getPeers();
+        int majority = majority(peers.size() + 1);
+        int currentTerm = raftState.getCurrentTerm();
+
+        for (long n = snapshot.lastIndex(); n > raftState.getCommitIndex(); n--) {
+            if (snapshot.termAt(n) != currentTerm) {
+                continue;
+            }
+            int replicas = 1; // сам лидер уже держит запись в своём логе
+            for (String peer : peers) {
+                Long matched = matchIndex.get(peer);
+                if (matched != null && matched >= n) {
+                    replicas++;
+                }
+            }
+            if (replicas < majority) {
+                continue;
+            }
+            long oldCommit = raftState.getCommitIndex();
+            raftState.advanceCommitIndex(n);
+            if (raftState.getCommitIndex() > oldCommit) {
+                log.info("commitIndex advanced from={} to={} term={}", oldCommit,
+                        raftState.getCommitIndex(), currentTerm);
+                applyCommittedSafelyLocked();
+            }
+            return;
+        }
+    }
+
+    // ---------------------------------------------------------------- replication
 
     private void startHeartbeatsLocked() {
         stopHeartbeatsLocked();
         long interval = raftProperties.getHeartbeatIntervalMs();
         heartbeatTask = heartbeatScheduler.scheduleWithFixedDelay(
-                this::sendHeartbeats, 0, interval, TimeUnit.MILLISECONDS);
+                this::sendAppendEntries, 0, interval, TimeUnit.MILLISECONDS);
     }
 
     private void stopHeartbeatsLocked() {
@@ -416,33 +611,58 @@ public class RaftNode {
         }
     }
 
-    private void sendHeartbeats() {
-        AppendEntriesRequest req;
-        List<String> peers;
+    /** Параметры одного адресата: у каждого пира свой {@code nextIndex}. */
+    private record ReplicationTarget(String peer, int term, long prevLogIndex, int prevLogTerm,
+                                     List<LogEntry> entries, long leaderCommit) {
+    }
+
+    /** Внеочередной раунд репликации; сеть всегда выполняется вне {@code nodeLock}. */
+    public void replicateNow() {
+        sendAppendEntries();
+    }
+
+    private void sendAppendEntries() {
+        List<ReplicationTarget> targets = new ArrayList<>();
+        int maxEntries;
+        long lastLogIndex;
         synchronized (nodeLock) {
             RaftStateSnapshot snapshot = raftState.snapshot();
-            // (5) актуальность лидера/терма перед отправкой
+            // Актуальность лидера/терма перед отправкой.
             if (snapshot.role() != NodeRole.LEADER) {
                 stopHeartbeatsLocked();
                 return;
             }
-            req = new AppendEntriesRequest(snapshot.currentTerm(), raftProperties.getNodeId());
-            peers = rpcClient.getPeers();
+            RaftLog currentLog = raftState.logSnapshot();
+            long leaderCommit = raftState.getCommitIndex();
+            int sendTerm = snapshot.currentTerm();
+            for (String peer : rpcClient.getPeers()) {
+                long next = Math.min(nextIndex.getOrDefault(peer, currentLog.lastIndex() + 1),
+                        currentLog.lastIndex() + 1);
+                long prevLogIndex = next - 1;
+                int prevLogTerm = currentLog.termAt(prevLogIndex);
+                List<LogEntry> entries = currentLog.entries().subList(
+                        (int) prevLogIndex, (int) currentLog.lastIndex());
+                targets.add(new ReplicationTarget(peer, sendTerm, prevLogIndex, prevLogTerm,
+                        entries, leaderCommit));
+            }
+            maxEntries = targets.stream().mapToInt(t -> t.entries().size()).max().orElse(0);
+            lastLogIndex = currentLog.lastIndex();
         }
 
         updateMdc();
         try {
-            int sendTerm = req.getTerm();
-            int entriesCount = req.getEntries() == null ? 0 : req.getEntries().size();
-            if (!peers.isEmpty()) {
-                log.info("AppendEntries sent term={} entries={} peers={}", sendTerm, entriesCount, peers.size());
+            if (!targets.isEmpty()) {
+                log.info("AppendEntries sent term={} peers={} entries={} leaderCommit={} lastLogIndex={}",
+                        targets.get(0).term(), targets.size(), maxEntries,
+                        targets.get(0).leaderCommit(), lastLogIndex);
             }
-            for (String peer : peers) {
-                rpcClient.appendEntries(peer, req).thenAccept(resp -> {
-                    if (resp == null) {
-                        return;
+            for (ReplicationTarget target : targets) {
+                AppendEntriesRequest req = new AppendEntriesRequest(target.term(), raftProperties.getNodeId(),
+                        target.prevLogIndex(), target.prevLogTerm(), target.entries(), target.leaderCommit());
+                rpcClient.appendEntries(target.peer(), req).thenAccept(resp -> {
+                    if (resp != null) {
+                        handleAppendEntriesResponse(target, resp);
                     }
-                    handleAppendEntriesResponse(resp, sendTerm);
                 });
             }
         } finally {
@@ -450,24 +670,67 @@ public class RaftNode {
         }
     }
 
-    private void handleAppendEntriesResponse(AppendEntriesResponse resp, int leaderTermAtSend) {
+    private void handleAppendEntriesResponse(ReplicationTarget target, AppendEntriesResponse resp) {
         updateMdc();
         try {
             synchronized (nodeLock) {
                 RaftStateSnapshot snapshot = raftState.snapshot();
-                // (5) ответ учитывается только для актуального лидерства/терма
-                if (snapshot.role() != NodeRole.LEADER || snapshot.currentTerm() != leaderTermAtSend) {
-                    return;
-                }
+                // Step-down по более высокому терму имеет приоритет над проверкой контекста.
                 if (resp.getTerm() > snapshot.currentTerm()) {
-                    log.info("stepping down (outgoing AppendEntries response has higher term) newTerm={}", resp.getTerm());
+                    log.info("stepping down (outgoing AppendEntries response has higher term) newTerm={} from={}",
+                            resp.getTerm(), target.peer());
                     raftState.updateTermAndVote(resp.getTerm(), null);
                     becomeFollowerLocked(null, true);
+                    return;
+                }
+                if (snapshot.role() != NodeRole.LEADER || snapshot.currentTerm() != target.term()) {
+                    return;
+                }
+
+                long oldNext = nextIndex.getOrDefault(target.peer(), target.prevLogIndex() + 1);
+                if (resp.isSuccess()) {
+                    // Resp-индекс пира может быть больше отправленного: он мог сохранить
+                    // совпадающий хвост. В кворум учитываем только то, что есть у лидера.
+                    long sentLastIndex = target.prevLogIndex() + target.entries().size();
+                    long match = Math.min(resp.getLastIndex(), sentLastIndex);
+                    long oldMatch = matchIndex.getOrDefault(target.peer(), 0L);
+                    if (match > oldMatch) {
+                        matchIndex.put(target.peer(), match);
+                    }
+                    long newNext = Math.max(oldNext, Math.max(match, sentLastIndex) + 1);
+                    nextIndex.put(target.peer(), newNext);
+                    log.debug("log replicated to {} matchIndex={} nextIndex={}", target.peer(), match, newNext);
+                    maybeCommitLocked();
+                } else {
+                    long newNext = conflictBasedNextIndex(resp, oldNext);
+                    nextIndex.put(target.peer(), newNext);
+                    log.debug("nextIndex decremented peer={} from={} to={} prevLogIndex={}",
+                            target.peer(), oldNext, newNext, target.prevLogIndex());
                 }
             }
         } finally {
             clearMdc();
         }
+    }
+
+    /**
+     * Откат {@code nextIndex} после отказа: подсказка по терму/индексу конфликта,
+     * если пир её прислал, иначе просто на одну запись назад. Никогда не увеличивает индекс.
+     */
+    private long conflictBasedNextIndex(AppendEntriesResponse resp, long currentNext) {
+        long candidate = currentNext - 1;
+        if (resp.getConflictTerm() > 0) {
+            long lastWithTerm = 0;
+            for (LogEntry entry : raftState.logSnapshot().entries()) {
+                if (entry.term() == resp.getConflictTerm()) {
+                    lastWithTerm = entry.index();
+                }
+            }
+            candidate = lastWithTerm > 0 ? lastWithTerm + 1 : resp.getConflictIndex();
+        } else if (resp.getConflictIndex() > 0) {
+            candidate = resp.getConflictIndex();
+        }
+        return Math.max(1, Math.min(candidate, currentNext - 1));
     }
 
     // ---------------------------------------------------------------- helpers
@@ -479,6 +742,8 @@ public class RaftNode {
     private void becomeFollowerLocked(String leaderId, boolean resetTimer) {
         raftState.setRole(NodeRole.FOLLOWER);
         raftState.setLeaderId(leaderId);
+        nextIndex.clear();
+        matchIndex.clear();
         stopHeartbeatsLocked();
         if (resetTimer) {
             electionTimer.reset();

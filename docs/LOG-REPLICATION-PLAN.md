@@ -335,34 +335,36 @@ heartbeat, опциональность conflict-оптимизации, volatil
 
 ### Этап 3. Репликация и коммит
 
-- [ ] При переходе в `LEADER`: `nextIndex[peer] = lastLogIndex + 1`,
-      `matchIndex[peer] = 0` (в `tryBecomeLeaderLocked`).
-- [ ] Сразу после избрания лидер добавляет `NoOpCommand` (Raft-уровневый маркер, не команда
+- [x] При переходе в `LEADER`: `nextIndex[peer] = lastLogIndex + 1`,
+      `matchIndex[peer] = 0` (через `initReplicationLocked` из `tryBecomeLeaderLocked`).
+- [x] Сразу после избрания лидер добавляет `NoOpCommand` (Raft-уровневый маркер, не команда
       state machine) своего терма и реплицирует его.
-- [ ] `AppendEntries` несёт `prevLogIndex`, `prevLogTerm`, `entries`, `leaderCommit`;
+- [x] `AppendEntries` несёт `prevLogIndex`, `prevLogTerm`, `entries`, `leaderCommit`;
       одна строка лога на раунд, детали по пирам — DEBUG.
-- [ ] Получатель: отказ при `term < currentTerm` и при несовпадении `prevLog*/term`.
-- [ ] Получатель: при конфликте удаляет запись и все последующие, затем дописывает
+- [x] Получатель: отказ при `term < currentTerm` и при несовпадении `prevLog*/term`.
+- [x] Получатель: при конфликте удаляет запись и все последующие, затем дописывает
       новые записи идемпотентно.
-- [ ] Получатель: `leaderCommit > commitIndex` → `min(leaderCommit, lastNewIndex)`,
+- [x] Получатель: `leaderCommit > commitIndex` → `min(leaderCommit, lastNewIndex)`,
       для пустого heartbeat верхняя граница — `lastLogIndex`.
-- [ ] Лидер: на успех обновляет `nextIndex`/`matchIndex`; на отказ уменьшает `nextIndex`
-      и повторяет (опционально с `conflictTerm`/`conflictIndex`).
-- [ ] Коммит только если `N > commitIndex`, большинство `matchIndex[i] >= N`
+- [x] Лидер: на успех обновляет `nextIndex`/`matchIndex`; на отказ уменьшает `nextIndex`
+      и повторяет с `conflictTerm`/`conflictIndex` (есть и безопасный откат на 1 запись).
+- [x] Коммит только если `N > commitIndex`, большинство `matchIndex[i] >= N`
       и `log[N].term == currentTerm`; старые записи коммитятся только косвенно.
-- [ ] Изменение `commitIndex` запускает apply на всех узлах: `UserCommand` →
+- [x] Изменение `commitIndex` запускает apply на всех узлах: `UserCommand` →
       `StateMachine.apply`, `NoOpCommand` → продвижение `lastApplied` без вызова SM.
-- [ ] Все мутации под `nodeLock`, сеть вне лока; после сети контекст перепроверяется
+- [x] Все мутации под `nodeLock`, сеть вне лока; после сети контекст перепроверяется
       (роль/терм), step-down при `term > currentTerm` сохранён.
-- [ ] Тесты 3 узлов: расхождение логов, truncate, `NoOpCommand`-конверт, коммит текущего
-      терма, перевыборы и сохранность записей.
-- [ ] Логирование этапа: `log entry appended`, `no-op entry appended`, дополненный
+- [x] Тесты 3 узлов: расхождение логов, truncate, `NoOpCommand`-конверт, коммит текущего
+      терма, перевыборы и сохранность записей (`RaftReplicationTest`, 5 тестов).
+- [x] Логирование этапа: `log entry appended`, `no-op entry appended`, дополненный
       `AppendEntries sent`, `log replicated to`, `log conflict truncated`,
       `commitIndex advanced`; MDC в async-колбэках и heartbeat-потоке, логи только из
       outcome/снапшотов, INFO для решений и DEBUG для деталей по пирам.
-- [ ] Проверка этапа: `mvn test` зелёный + E2E на 3 узлах (старт, запись NoOp,
-      `/status`, перевыборы, сохранность); при желании замер времени старта.
-- [ ] Доки: `docs/CODE-STATE.md` — `nextIndex`/`matchIndex`, обновлённые `RaftNode` и
+- [x] Проверка этапа: `mvn test` — 55/55, `mvn clean package -DskipTests` — BUILD SUCCESS;
+      smoke на 3 узлах (18080-18082): один лидер, NoOp реплицирован и закоммичен на всех
+      узлах, `/status` согласован; кластер остановлен, порты свободны. Перевыборы и
+      сохранность записей проверены in-memory тестом с маршрутизацией RPC.
+- [x] Доки: `docs/CODE-STATE.md` — `nextIndex`/`matchIndex`, обновлённые `RaftNode` и
       `RaftRpcService`, границы `nodeLock`; `docs/PROJECT-OVERVIEW.md` — «лог реплицируется,
       API ещё нет».
 

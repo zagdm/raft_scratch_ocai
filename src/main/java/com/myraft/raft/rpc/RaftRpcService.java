@@ -111,9 +111,11 @@ public class RaftRpcService {
             updateMdc(after);
             logAppendEntriesDecision(request, outcome);
 
-            AppendEntriesResponse response = new AppendEntriesResponse(after.currentTerm(), outcome.accepted());
-            log.debug("AppendEntries response sent -> {} term={} success={}",
-                    request.getLeaderId(), response.getTerm(), response.isSuccess());
+            AppendEntriesOutcome.Details details = outcome.details();
+            AppendEntriesResponse response = new AppendEntriesResponse(after.currentTerm(), outcome.accepted(),
+                    after.lastLogIndex(), details.conflictTerm(), details.conflictIndex());
+            log.debug("AppendEntries response sent -> {} term={} success={} lastIndex={}",
+                    request.getLeaderId(), response.getTerm(), response.isSuccess(), response.getLastIndex());
             return response;
         } finally {
             clearMdc();
@@ -160,6 +162,17 @@ public class RaftRpcService {
         StateTransition state = outcome.state();
         int term = state.after().currentTerm();
         String leader = request.getLeaderId();
+        AppendEntriesOutcome.Details details = outcome.details();
+
+        if (details.truncated()) {
+            log.info("log conflict truncated from={} appended={} term={}",
+                    details.lastNewIndex() - details.appended() + 1, details.appended(), term);
+        }
+        if (details.appended() > 0) {
+            log.info("log entry appended count={} lastNewIndex={} from={} term={}",
+                    details.appended(), details.lastNewIndex(), leader, term);
+        }
+
         switch (outcome.event()) {
             case ACCEPTED_TERM_ADVANCED -> log.info(
                     "stepping down (incoming AppendEntries has higher term) newTerm={} from={}", term, leader);
@@ -172,6 +185,13 @@ public class RaftRpcService {
                 }
             }
             case ACCEPTED_IDEMPOTENT -> log.debug("heartbeat accepted (no state change) from={} term={}", leader, term);
+            case ACCEPTED_LOG_APPENDED, ACCEPTED_LOG_TRUNCATED -> log.debug(
+                    "log entries accepted from={} term={} count={}", leader, term, details.appended());
+            case REJECTED_LOG_MISMATCH -> log.info(
+                    "log mismatch rejected from={} term={} prevLogIndex={} prevLogTerm={}"
+                            + " localLastLogIndex={} localLastLogTerm={}",
+                    leader, term, request.getPrevLogIndex(), request.getPrevLogTerm(),
+                    state.after().lastLogIndex(), state.after().lastLogTerm());
             case REJECTED_STALE_TERM -> log.debug(
                     "heartbeat ignored (incoming AppendEntries stale term) from={} theirTerm={} term={}",
                     leader, request.getTerm(), term);

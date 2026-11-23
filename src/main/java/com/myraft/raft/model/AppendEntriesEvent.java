@@ -10,8 +10,14 @@ public enum AppendEntriesEvent {
     ACCEPTED_LEADER_DISCOVERED,
     /** Повторный heartbeat от уже известного лидера: состояние не изменилось. */
     ACCEPTED_IDEMPOTENT,
+    /** От лидера получены новые записи, конфликта не было. */
+    ACCEPTED_LOG_APPENDED,
+    /** Конфликтующий хвост лога удалён, на его место записаны записи лидера. */
+    ACCEPTED_LOG_TRUNCATED,
     /** Терм лидера ниже текущего. */
     REJECTED_STALE_TERM,
     /** Равный терм, но лидер уже известен и это другой узел: heartbeat игнорируется. */
-    REJECTED_FOREIGN_LEADER
+    REJECTED_FOREIGN_LEADER,
+    /** {@code prevLogIndex}/{@code prevLogTerm} не совпали с локальным логом. */
+    REJECTED_LOG_MISMATCH
 }
