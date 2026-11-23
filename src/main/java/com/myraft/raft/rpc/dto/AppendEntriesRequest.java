@@ -1,5 +1,7 @@
 package com.myraft.raft.rpc.dto;
 
+import com.myraft.raft.model.LogEntry;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -8,16 +10,24 @@ public class AppendEntriesRequest {
     private String leaderId;
     private long prevLogIndex = 0;
     private int prevLogTerm = 0;
-    private List<Object> entries = new ArrayList<>();
+    private List<LogEntry> entries = new ArrayList<>();
     private long leaderCommit = 0;
 
     public AppendEntriesRequest() {
     }
 
     public AppendEntriesRequest(int term, String leaderId) {
+        this(term, leaderId, 0, 0, List.of(), 0);
+    }
+
+    public AppendEntriesRequest(int term, String leaderId, long prevLogIndex, int prevLogTerm,
+                                List<LogEntry> entries, long leaderCommit) {
         this.term = term;
         this.leaderId = leaderId;
-        this.entries = new ArrayList<>();
+        this.prevLogIndex = prevLogIndex;
+        this.prevLogTerm = prevLogTerm;
+        this.entries = entries == null ? new ArrayList<>() : new ArrayList<>(entries);
+        this.leaderCommit = leaderCommit;
     }
 
     public int getTerm() {
@@ -52,12 +62,12 @@ public class AppendEntriesRequest {
         this.prevLogTerm = prevLogTerm;
     }
 
-    public List<Object> getEntries() {
+    public List<LogEntry> getEntries() {
         return entries;
     }
 
-    public void setEntries(List<Object> entries) {
-        this.entries = entries;
+    public void setEntries(List<LogEntry> entries) {
+        this.entries = entries == null ? new ArrayList<>() : new ArrayList<>(entries);
     }
 
     public long getLeaderCommit() {

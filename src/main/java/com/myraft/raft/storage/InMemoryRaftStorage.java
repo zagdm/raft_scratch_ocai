@@ -14,7 +14,7 @@ public class InMemoryRaftStorage implements RaftStorage {
     }
 
     @Override
-    public synchronized void persist(int term, String votedFor) {
-        this.state = new PersistedState(term, votedFor);
+    public synchronized void persist(PersistedState state) {
+        this.state = state;
     }
 }

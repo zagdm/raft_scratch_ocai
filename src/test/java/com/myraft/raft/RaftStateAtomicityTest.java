@@ -1,7 +1,10 @@
 package com.myraft.raft;
 
+import com.myraft.raft.model.LogEntry;
+import com.myraft.raft.model.NoOpCommand;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.storage.InMemoryRaftStorage;
+import com.myraft.raft.storage.PersistedState;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -45,6 +48,26 @@ class RaftStateAtomicityTest {
         assertEquals("node-1", state.getVotedFor());
         assertEquals(3, storage.load().term());
         assertEquals("node-1", storage.load().votedFor());
+    }
+
+    @Test
+    void logChangesArePersistedWithTermAndVote() {
+        InMemoryRaftStorage storage = new InMemoryRaftStorage();
+        RaftState state = new RaftState(storage);
+        state.updateTermAndVote(2, "node-a");
+
+        state.appendLogEntry(new LogEntry(1, 2, new NoOpCommand()));
+
+        assertEquals(1, state.lastLogIndex());
+        assertEquals(2, state.lastLogTerm());
+        PersistedState saved = storage.load();
+        assertEquals(2, saved.term());
+        assertEquals("node-a", saved.votedFor());
+        assertEquals(1, saved.log().size());
+        assertEquals(1, new RaftState(storage).lastLogIndex(), "log must be restored on restart");
+
+        state.truncateLogFrom(1);
+        assertEquals(0, new RaftState(storage).lastLogIndex());
     }
 
     @Test

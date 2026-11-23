@@ -3,7 +3,10 @@ package com.myraft.raft;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.storage.InMemoryRaftStorage;
+import com.myraft.raft.storage.PersistedState;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -34,7 +37,7 @@ public class RaftElectionTest {
     @Test
     public void stateIsRestoredFromStorage() {
         InMemoryRaftStorage storage = new InMemoryRaftStorage();
-        storage.persist(7, "node-3");
+        storage.persist(new PersistedState(7, "node-3", List.of()));
 
         RaftState restored = new RaftState(storage);
 

@@ -55,8 +55,7 @@ public class FileRaftStorage implements RaftStorage {
     }
 
     @Override
-    public synchronized void persist(int term, String votedFor) {
-        PersistedState state = new PersistedState(term, votedFor);
+    public synchronized void persist(PersistedState state) {
         Path absolute = file.toAbsolutePath();
         Path tmp = absolute.resolveSibling(absolute.getFileName() + ".tmp");
         try {
@@ -77,7 +76,8 @@ public class FileRaftStorage implements RaftStorage {
             } catch (AtomicMoveNotSupportedException e) {
                 Files.move(tmp, absolute, StandardCopyOption.REPLACE_EXISTING);
             }
-            log.trace("storage persisted term={} votedFor={}", term, votedFor);
+            log.trace("storage persisted term={} votedFor={} logSize={}",
+                    state.term(), state.votedFor(), state.logSize());
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to persist Raft state to " + absolute, e);
         }

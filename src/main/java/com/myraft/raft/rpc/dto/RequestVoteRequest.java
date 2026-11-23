@@ -10,10 +10,14 @@ public class RequestVoteRequest {
     }
 
     public RequestVoteRequest(int term, String candidateId) {
+        this(term, candidateId, 0, 0);
+    }
+
+    public RequestVoteRequest(int term, String candidateId, long lastLogIndex, int lastLogTerm) {
         this.term = term;
         this.candidateId = candidateId;
-        this.lastLogIndex = 0;
-        this.lastLogTerm = 0;
+        this.lastLogIndex = lastLogIndex;
+        this.lastLogTerm = lastLogTerm;
     }
 
     public int getTerm() {

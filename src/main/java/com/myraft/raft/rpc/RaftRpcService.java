@@ -5,6 +5,7 @@ import com.myraft.raft.RaftNode;
 import com.myraft.raft.model.AppendEntriesEvent;
 import com.myraft.raft.model.AppendEntriesOutcome;
 import com.myraft.raft.model.NodeRole;
+import com.myraft.raft.model.RaftLog;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.model.RaftState.RaftStateSnapshot;
 import com.myraft.raft.model.RequestVoteEvent;
@@ -49,15 +50,25 @@ public class RaftRpcService {
         try {
             log.debug("RequestVote received <- {} term={}", request.getCandidateId(), request.getTerm());
 
-            // Prefilter по снапшоту: оба случая монотонно неприменимы, узел не вызывается.
-            RequestVoteOutcome outcome = request.getTerm() < pre.currentTerm()
-                    ? new RequestVoteOutcome(RequestVoteEvent.REJECTED_STALE_TERM, new StateTransition(pre, pre))
-                    : request.getTerm() == pre.currentTerm()
-                            && pre.votedFor() != null
-                            && !pre.votedFor().equals(request.getCandidateId())
-                            ? new RequestVoteOutcome(RequestVoteEvent.REJECTED_ALREADY_VOTED,
-                                    new StateTransition(pre, pre))
-                            : raftNode.handleRequestVote(request);
+            // Prefilter по снапшоту: случаи, монотонно неприменимые к узлу.
+            // При term > currentTerm узел всё равно вызывается, чтобы шагнуть вниз по §5.1.
+            RequestVoteOutcome outcome;
+            if (request.getTerm() < pre.currentTerm()) {
+                outcome = new RequestVoteOutcome(RequestVoteEvent.REJECTED_STALE_TERM,
+                        new StateTransition(pre, pre));
+            } else if (request.getTerm() == pre.currentTerm()
+                    && pre.votedFor() != null
+                    && !pre.votedFor().equals(request.getCandidateId())) {
+                outcome = new RequestVoteOutcome(RequestVoteEvent.REJECTED_ALREADY_VOTED,
+                        new StateTransition(pre, pre));
+            } else if (request.getTerm() == pre.currentTerm()
+                    && !RaftLog.isAtLeastAsUpToDate(request.getLastLogTerm(), request.getLastLogIndex(),
+                            pre.lastLogTerm(), pre.lastLogIndex())) {
+                outcome = new RequestVoteOutcome(RequestVoteEvent.REJECTED_LOG_NOT_UP_TO_DATE,
+                        new StateTransition(pre, pre));
+            } else {
+                outcome = raftNode.handleRequestVote(request);
+            }
 
             // Повторный голос тому же кандидату — решение сервиса по before/after узла.
             outcome = resolveRepeat(request, outcome);
@@ -137,6 +148,11 @@ public class RaftRpcService {
                     candidate, request.getTerm(), term);
             case REJECTED_ALREADY_VOTED -> log.info(
                     "vote rejected (already voted / condition failed) to {} term={}", candidate, term);
+            case REJECTED_LOG_NOT_UP_TO_DATE -> log.info(
+                    "vote rejected (log not up-to-date) from={} candidateLastLogTerm={} candidateLastLogIndex={}"
+                            + " localLastLogTerm={} localLastLogIndex={} term={}",
+                    candidate, request.getLastLogTerm(), request.getLastLogIndex(),
+                    state.before().lastLogTerm(), state.before().lastLogIndex(), term);
         }
     }
 

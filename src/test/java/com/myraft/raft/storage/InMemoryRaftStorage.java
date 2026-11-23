@@ -12,7 +12,7 @@ public class InMemoryRaftStorage implements RaftStorage {
     }
 
     @Override
-    public void persist(int term, String votedFor) {
-        state = new PersistedState(term, votedFor);
+    public void persist(PersistedState state) {
+        this.state = state;
     }
 }

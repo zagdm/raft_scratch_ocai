@@ -13,5 +13,7 @@ public enum RequestVoteEvent {
     /** Терм кандидата ниже текущего. */
     REJECTED_STALE_TERM,
     /** В этом терме уже голосовали за другого кандидата. */
-    REJECTED_ALREADY_VOTED
+    REJECTED_ALREADY_VOTED,
+    /** Лог голосующего свежее лога кандидата (§5.4.1 статьи Raft). */
+    REJECTED_LOG_NOT_UP_TO_DATE
 }

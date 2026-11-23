@@ -4,6 +4,7 @@ import com.myraft.config.RaftProperties;
 import com.myraft.raft.model.AppendEntriesEvent;
 import com.myraft.raft.model.AppendEntriesOutcome;
 import com.myraft.raft.model.NodeRole;
+import com.myraft.raft.model.RaftLog;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.model.RaftState.RaftStateSnapshot;
 import com.myraft.raft.model.RequestVoteEvent;
@@ -87,6 +88,24 @@ public class RaftNode {
     public RequestVoteOutcome handleRequestVote(RequestVoteRequest request) {
         synchronized (nodeLock) {
             RaftStateSnapshot before = raftState.snapshot();
+            if (request.getTerm() < before.currentTerm()) {
+                return new RequestVoteOutcome(RequestVoteEvent.REJECTED_STALE_TERM,
+                        new StateTransition(before, before));
+            }
+            // §5.4.1: голосующий отказывает, если его лог свежее лога кандидата.
+            boolean upToDate = RaftLog.isAtLeastAsUpToDate(
+                    request.getLastLogTerm(), request.getLastLogIndex(),
+                    before.lastLogTerm(), before.lastLogIndex());
+            if (!upToDate) {
+                if (request.getTerm() > before.currentTerm()) {
+                    raftState.updateTermAndVote(request.getTerm(), null);
+                    becomeFollowerLocked(null, true);
+                }
+                RaftStateSnapshot after = raftState.snapshot();
+                return new RequestVoteOutcome(RequestVoteEvent.REJECTED_LOG_NOT_UP_TO_DATE,
+                        new StateTransition(before, after));
+            }
+
             RaftState.GrantVoteResult result = raftState.grantVote(request.getTerm(), request.getCandidateId());
 
             boolean granted = result.granted();
@@ -195,6 +214,8 @@ public class RaftNode {
     private void startElection() {
         List<String> peers;
         int electionTerm;
+        long electionLastLogIndex;
+        int electionLastLogTerm;
         AtomicInteger votes = new AtomicInteger(1); // голос за себя
         int majority;
 
@@ -221,6 +242,8 @@ public class RaftNode {
             log.info("starting election term={} (voted for self)", electionTerm);
             electionTimer.reset();
 
+            electionLastLogIndex = afterStart.lastLogIndex();
+            electionLastLogTerm = afterStart.lastLogTerm();
             peers = rpcClient.getPeers();
             majority = majority(peers.size() + 1);
 
@@ -235,7 +258,8 @@ public class RaftNode {
         // а не на каждый адресат; детали по пирам остаются в RaftRpcClient на DEBUG.
         log.info("RequestVote sent term={} peers={}", electionTerm, peers.size());
         for (String peer : peers) {
-            RequestVoteRequest req = new RequestVoteRequest(electionTerm, raftProperties.getNodeId());
+            RequestVoteRequest req = new RequestVoteRequest(electionTerm, raftProperties.getNodeId(),
+                    electionLastLogIndex, electionLastLogTerm);
             rpcClient.requestVote(peer, req).thenAccept(resp -> {
                 if (resp == null) {
                     return;
