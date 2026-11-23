@@ -2,8 +2,10 @@ package com.myraft.raft.rpc.dto;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
+import com.myraft.raft.fsm.kv.KvCommandsModule;
+import com.myraft.raft.fsm.kv.PutCommand;
 import com.myraft.raft.model.LogEntry;
-import com.myraft.raft.model.PutCommand;
+import com.myraft.raft.model.UserCommand;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -18,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class RaftDtoJsonTest {
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper().registerModule(new KvCommandsModule());
 
     @Test
     void requestVoteCarriesLogMetadata() throws Exception {
@@ -38,7 +40,8 @@ class RaftDtoJsonTest {
     @Test
     void appendEntriesCarriesEntriesAndCommitMetadata() throws Exception {
         AppendEntriesRequest request = new AppendEntriesRequest(7, "leader", 1, 3,
-                List.of(new LogEntry(2, 7, new PutCommand("key", TextNode.valueOf("value")))), 2);
+                List.of(new LogEntry(2, 7,
+                        new UserCommand(new PutCommand("key", TextNode.valueOf("value"))))), 2);
 
         AppendEntriesRequest restored = mapper.readValue(
                 mapper.writeValueAsString(request), AppendEntriesRequest.class);
@@ -50,8 +53,10 @@ class RaftDtoJsonTest {
         assertEquals(2, restored.getLeaderCommit());
         assertEquals(1, restored.getEntries().size());
         assertEquals(2, restored.getEntries().get(0).index());
-        assertInstanceOf(PutCommand.class, restored.getEntries().get(0).command());
-        assertEquals("key", ((PutCommand) restored.getEntries().get(0).command()).key());
+        UserCommand command = assertInstanceOf(UserCommand.class, restored.getEntries().get(0).command());
+        PutCommand payload = assertInstanceOf(PutCommand.class, command.payload());
+        assertEquals("key", payload.key());
+        assertEquals(TextNode.valueOf("value"), payload.value());
     }
 
     @Test

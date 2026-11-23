@@ -1,15 +1,20 @@
 package com.myraft.raft;
 
 import com.myraft.config.RaftProperties;
+import com.myraft.raft.fsm.ApplyResult;
+import com.myraft.raft.fsm.StateMachine;
 import com.myraft.raft.model.AppendEntriesEvent;
 import com.myraft.raft.model.AppendEntriesOutcome;
+import com.myraft.raft.model.LogEntry;
 import com.myraft.raft.model.NodeRole;
+import com.myraft.raft.model.RaftCommand;
 import com.myraft.raft.model.RaftLog;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.model.RaftState.RaftStateSnapshot;
 import com.myraft.raft.model.RequestVoteEvent;
 import com.myraft.raft.model.RequestVoteOutcome;
 import com.myraft.raft.model.StateTransition;
+import com.myraft.raft.model.UserCommand;
 import com.myraft.raft.rpc.RaftRpcClient;
 import com.myraft.raft.rpc.dto.AppendEntriesRequest;
 import com.myraft.raft.rpc.dto.AppendEntriesResponse;
@@ -23,7 +28,9 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -48,6 +55,10 @@ public class RaftNode {
     private final RaftProperties raftProperties;
     private final RaftRpcClient rpcClient;
     private final ElectionTimer electionTimer;
+    private final StateMachine<?> stateMachine;
+
+    /** Результаты apply по индексу; ожидающие клиенты появятся на этапе 4. */
+    private final Map<Long, ApplyResult<?>> appliedResults = new HashMap<>();
     private final ScheduledExecutorService heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "raft-heartbeat");
         t.setDaemon(true);
@@ -56,11 +67,13 @@ public class RaftNode {
 
     private ScheduledFuture<?> heartbeatTask;
 
-    public RaftNode(RaftState raftState, RaftProperties raftProperties, RaftRpcClient rpcClient, ElectionTimer electionTimer) {
+    public RaftNode(RaftState raftState, RaftProperties raftProperties, RaftRpcClient rpcClient,
+                    ElectionTimer electionTimer, StateMachine<?> stateMachine) {
         this.raftState = raftState;
         this.raftProperties = raftProperties;
         this.rpcClient = rpcClient;
         this.electionTimer = electionTimer;
+        this.stateMachine = stateMachine;
     }
 
     @PostConstruct
@@ -196,6 +209,59 @@ public class RaftNode {
 
             RaftStateSnapshot after = raftState.snapshot();
             return new AppendEntriesOutcome(event, new StateTransition(before, after));
+        }
+    }
+
+    // ---------------------------------------------------------------- apply
+
+    /**
+     * Применяет закоммиченные записи к state machine под {@code nodeLock}.
+     * Продвижение {@code commitIndex} по большинству появится на этапе 3;
+     * пока тесты задают его через {@code RaftState.advanceCommitIndex}.
+     */
+    public void applyCommittedEntries() {
+        updateMdc();
+        try {
+            synchronized (nodeLock) {
+                applyCommittedLocked();
+            }
+        } finally {
+            clearMdc();
+        }
+    }
+
+    /** Результат apply непрозрачен для ядра; API-адаптер конкретизирует его на этапе 4. */
+    public ApplyResult<?> appliedResult(long index) {
+        synchronized (nodeLock) {
+            return appliedResults.get(index);
+        }
+    }
+
+    private void applyCommittedLocked() {
+        long commitIndex = raftState.getCommitIndex();
+        long lastApplied = raftState.getLastApplied();
+        if (lastApplied >= commitIndex) {
+            log.debug("apply skipped lastApplied={} commitIndex={}", lastApplied, commitIndex);
+            return;
+        }
+        RaftLog logSnapshot = raftState.logSnapshot();
+        while (lastApplied < commitIndex) {
+            long next = lastApplied + 1;
+            LogEntry entry = logSnapshot.entryAt(next);
+            if (entry == null) {
+                break;
+            }
+            RaftCommand command = entry.command();
+            if (command instanceof UserCommand user) {
+                ApplyResult<?> result = stateMachine.apply(next, user.payload());
+                appliedResults.put(next, result);
+                log.info("entry applied index={} lastApplied={}", next, next);
+            } else {
+                // NoOpCommand: Raft-маркер, state machine не вызывается.
+                log.debug("no-op applied index={} lastApplied={}", next, next);
+            }
+            raftState.advanceLastApplied(next);
+            lastApplied = next;
         }
     }
 

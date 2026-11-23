@@ -3,6 +3,7 @@ package com.myraft.raft.rpc;
 import com.myraft.config.ClusterProperties;
 import com.myraft.config.RaftProperties;
 import com.myraft.raft.RaftNode;
+import com.myraft.raft.fsm.kv.KvStateMachine;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.rpc.dto.AppendEntriesRequest;
@@ -39,7 +40,7 @@ class RaftRpcServiceAtomicityTest {
 
     private static RaftRpcService newService(RaftState state, RaftProperties props) {
         RaftRpcClient client = new RaftRpcClient(new RestTemplate(), new ClusterProperties());
-        RaftNode node = new RaftNode(state, props, client, new ElectionTimer(props));
+        RaftNode node = new RaftNode(state, props, client, new ElectionTimer(props), new KvStateMachine());
         return new RaftRpcService(node, state, props);
     }
 

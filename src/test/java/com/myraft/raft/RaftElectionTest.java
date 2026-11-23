@@ -37,7 +37,7 @@ public class RaftElectionTest {
     @Test
     public void stateIsRestoredFromStorage() {
         InMemoryRaftStorage storage = new InMemoryRaftStorage();
-        storage.persist(new PersistedState(7, "node-3", List.of()));
+        storage.persist(PersistedState.of(7, "node-3", List.of()));
 
         RaftState restored = new RaftState(storage);
 

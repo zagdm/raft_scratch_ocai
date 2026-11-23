@@ -1,6 +1,7 @@
 package com.myraft.raft.model;
 
 import com.fasterxml.jackson.databind.node.TextNode;
+import com.myraft.raft.fsm.kv.PutCommand;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -28,7 +29,7 @@ class RaftLogTest {
 
     @Test
     void appendIsImmutableAndKeepsOneBasedIndices() {
-        LogEntry first = new LogEntry(1, 2, new PutCommand("a", TextNode.valueOf("1")));
+        LogEntry first = new LogEntry(1, 2, new UserCommand(new PutCommand("a", TextNode.valueOf("1"))));
         LogEntry second = new LogEntry(2, 3, new NoOpCommand());
 
         RaftLog log = RaftLog.EMPTY.append(first).append(second);

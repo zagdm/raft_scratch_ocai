@@ -2,6 +2,7 @@ package com.myraft.raft;
 
 import com.myraft.config.ClusterProperties;
 import com.myraft.config.RaftProperties;
+import com.myraft.raft.fsm.kv.KvStateMachine;
 import com.myraft.raft.model.NodeRole;
 import com.myraft.raft.model.RaftState;
 import com.myraft.raft.rpc.RaftRpcClient;
@@ -26,7 +27,7 @@ class RaftNodeElectionTest {
         RaftState state = new RaftState(new InMemoryRaftStorage());
         ElectionTimer timer = new ElectionTimer(props);
         RaftRpcClient rpcClient = new RaftRpcClient(new RestTemplate(), new ClusterProperties());
-        RaftNode node = new RaftNode(state, props, rpcClient, timer);
+        RaftNode node = new RaftNode(state, props, rpcClient, timer, new KvStateMachine());
 
         node.init();
         try {

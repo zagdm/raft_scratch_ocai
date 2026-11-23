@@ -20,6 +20,9 @@ public class RaftState {
     private volatile NodeRole role = NodeRole.FOLLOWER;
     private volatile String leaderId = null;
     private volatile RaftLog raftLog;
+    // Volatile по Figure 2: не персистируются и не восстанавливаются при перезапуске.
+    private volatile long commitIndex;
+    private volatile long lastApplied;
     private final long startTime = System.currentTimeMillis();
 
     public RaftState(RaftStorage storage) {
@@ -72,7 +75,7 @@ public class RaftState {
      */
     private void persistLocked(int term, String votedFor, RaftLog nextLog) {
         try {
-            storage.persist(new PersistedState(term, votedFor, nextLog.entries()));
+            storage.persist(PersistedState.of(term, votedFor, nextLog.entries()));
         } catch (RuntimeException e) {
             log.error("log persist failed term={} votedFor={} logSize={}",
                     term, votedFor, nextLog.lastIndex(), e);
@@ -185,6 +188,51 @@ public class RaftState {
         lock.readLock().lock();
         try {
             return raftLog.lastTerm();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Volatile-указатель коммита. Монотонно и не может опережать конец лога
+     * (правило §5.3: лидер коммитит только записи, которые у него есть).
+     */
+    public void advanceCommitIndex(long newCommitIndex) {
+        lock.writeLock().lock();
+        try {
+            if (newCommitIndex > commitIndex) {
+                commitIndex = Math.min(newCommitIndex, raftLog.lastIndex());
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public long getCommitIndex() {
+        lock.readLock().lock();
+        try {
+            return commitIndex;
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /** Монотонно продвигает указатель применённых записей. */
+    public void advanceLastApplied(long newLastApplied) {
+        lock.writeLock().lock();
+        try {
+            if (newLastApplied > lastApplied) {
+                lastApplied = newLastApplied;
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public long getLastApplied() {
+        lock.readLock().lock();
+        try {
+            return lastApplied;
         } finally {
             lock.readLock().unlock();
         }

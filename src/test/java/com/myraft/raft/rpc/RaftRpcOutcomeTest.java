@@ -3,6 +3,7 @@ package com.myraft.raft.rpc;
 import com.myraft.config.ClusterProperties;
 import com.myraft.config.RaftProperties;
 import com.myraft.raft.RaftNode;
+import com.myraft.raft.fsm.kv.KvStateMachine;
 import com.myraft.raft.model.AppendEntriesEvent;
 import com.myraft.raft.model.AppendEntriesOutcome;
 import com.myraft.raft.model.NodeRole;
@@ -44,7 +45,7 @@ class RaftRpcOutcomeTest {
 
     private static RaftNode newNode(RaftState state, RaftProperties props) {
         return new RaftNode(state, props, new RaftRpcClient(new RestTemplate(), new ClusterProperties()),
-                new ElectionTimer(props));
+                new ElectionTimer(props), new KvStateMachine());
     }
 
     private static RaftRpcService newService(RaftNode node, RaftState state, RaftProperties props) {
@@ -199,7 +200,7 @@ class RaftRpcOutcomeTest {
         RaftProperties config = props("node-1");
         CountingElectionTimer timer = new CountingElectionTimer(config);
         RaftNode node = new RaftNode(state, config,
-                new RaftRpcClient(new RestTemplate(), new ClusterProperties()), timer);
+                new RaftRpcClient(new RestTemplate(), new ClusterProperties()), timer, new KvStateMachine());
         RaftRpcService service = newService(node, state, config);
 
         assertTrue(service.handleRequestVote(new RequestVoteRequest(5, "cand-a")).isVoteGranted());

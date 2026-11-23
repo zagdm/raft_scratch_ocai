@@ -28,10 +28,11 @@ public class FileRaftStorage implements RaftStorage {
     private static final Logger log = LoggerFactory.getLogger(FileRaftStorage.class);
 
     private final Path file;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    public FileRaftStorage(RaftProperties raftProperties) {
+    public FileRaftStorage(RaftProperties raftProperties, ObjectMapper objectMapper) {
         this.file = Path.of(raftProperties.getStoragePath());
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -45,8 +46,13 @@ public class FileRaftStorage implements RaftStorage {
             if (state == null) {
                 return PersistedState.EMPTY;
             }
-            log.debug("storage loaded path={} term={} votedFor={}",
-                    file.toAbsolutePath(), state.term(), state.votedFor());
+            if (state.formatVersion() != PersistedState.CURRENT_FORMAT_VERSION) {
+                throw new IllegalStateException("unsupported raft state format version="
+                        + state.formatVersion() + " expected=" + PersistedState.CURRENT_FORMAT_VERSION
+                        + " path=" + file.toAbsolutePath());
+            }
+            log.debug("storage loaded path={} term={} votedFor={} formatVersion={}",
+                    file.toAbsolutePath(), state.term(), state.votedFor(), state.formatVersion());
             return state;
         } catch (IOException e) {
             // Молча начинать с term=0 нельзя: это может привести к двойному голосованию.

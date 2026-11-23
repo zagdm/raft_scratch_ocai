@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * Запись реплицируемого лога. Индексы начинаются с 1 (как в Figure 2 статьи Raft).
  */
-public record LogEntry(long index, int term, Command command) {
+public record LogEntry(long index, int term, RaftCommand command) {
 
     public LogEntry {
         if (index < 1) {

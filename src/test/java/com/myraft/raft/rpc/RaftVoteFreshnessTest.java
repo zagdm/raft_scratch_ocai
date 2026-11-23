@@ -3,6 +3,7 @@ package com.myraft.raft.rpc;
 import com.myraft.config.ClusterProperties;
 import com.myraft.config.RaftProperties;
 import com.myraft.raft.RaftNode;
+import com.myraft.raft.fsm.kv.KvStateMachine;
 import com.myraft.raft.model.LogEntry;
 import com.myraft.raft.model.NoOpCommand;
 import com.myraft.raft.model.RaftState;
@@ -41,7 +42,7 @@ class RaftVoteFreshnessTest {
 
     private static RaftNode node(RaftState state, RaftProperties props) {
         return new RaftNode(state, props, new RaftRpcClient(new RestTemplate(), new ClusterProperties()),
-                new ElectionTimer(props));
+                new ElectionTimer(props), new KvStateMachine());
     }
 
     @Test
