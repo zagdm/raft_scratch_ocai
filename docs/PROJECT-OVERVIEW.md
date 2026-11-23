@@ -18,7 +18,7 @@
 
 ## Сборка, запуск, тесты
 - Сборка: `mvn clean package -DskipTests` (или `scripts\runtime\build-jar.cmd`).
-- Тесты: `mvn test` — **60/60, BUILD SUCCESS** (19 исходных + 16 этапа 1 + 15 этапа 2 + 5 этапа 3 + 5 этапа 4). Новые этапа 4: `api.RaftClientApiTest` — запись → чтение, JSON `null`, redirect с фолловера, валидация ключа, таймаут apply; `/log` без NoOp. Сборка: `mvn clean package -DskipTests` — BUILD SUCCESS.
+- Тесты: `mvn test` — **63/63, BUILD SUCCESS** (19 исходных + 16 этапа 1 + 15 этапа 2 + 5 этапа 3 + 5 этапа 4 + 3 плана отказоустойчивости). Новые плана отказоустойчивости (`docs/TEST-PLAN.md`): гибель лидера и возврат старого, гибель фолловера и догон лога, перезапуск с `FileRaftStorage` (term/vote/лог сохраняются, commit/lastApplied нет). Сборка: `mvn clean package -DskipTests` — BUILD SUCCESS.
 - Запуск кластера: `scripts\runtime\start-cluster.cmd [total-nodes] [base-port] [--jvm "..."]` (цикл вызовов `start-node.cmd`).
 - Запуск узла: `scripts\runtime\start-node.cmd <node> [total-nodes] [base-port] [--jvm "..."]`.
 - Остановка: `scripts\runtime\stop-cluster.cmd` (закрытие окна узла также останавливает узел).
