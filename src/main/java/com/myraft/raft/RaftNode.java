@@ -35,10 +35,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -60,8 +63,11 @@ public class RaftNode {
     private final ElectionTimer electionTimer;
     private final StateMachine<?> stateMachine;
 
-    /** Результаты apply по индексу; ожидающие клиенты появятся на этапе 4. */
+    /** Результаты apply по индексу; ожидающие клиенты снимаются через {@link #awaitApplied}. */
     private final Map<Long, ApplyResult<?>> appliedResults = new HashMap<>();
+
+    /** Ожидающие apply клиенты: один future на индекс, снимается под {@code nodeLock}. */
+    private final Map<Long, CompletableFuture<ApplyResult<?>>> pendingApplies = new HashMap<>();
 
     /**
      * Состояние репликации лидера: только под {@link #nodeLock}, сбрасывается при
@@ -332,10 +338,57 @@ public class RaftNode {
         }
     }
 
-    /** Результат apply непрозрачен для ядра; API-адаптер конкретизирует его на этапе 4. */
+    /** Результат apply непрозрачен для ядра; API-адаптер конкретизирует его в JSON. */
     public ApplyResult<?> appliedResult(long index) {
         synchronized (nodeLock) {
             return appliedResults.get(index);
+        }
+    }
+
+    /**
+     * Ждёт, пока запись с индексом {@code index} будет применена к state machine.
+     * <p>
+     * Регистрация future и чтение уже готового результата выполняются под
+     * {@code nodeLock}; само ожидание — вне лока, чтобы не блокировать Raft-переходы.
+     * Таймаут снимает свою регистрацию, поэтому поздний apply не уведомляет старый запрос.
+     */
+    public ApplyResult<?> awaitApplied(long index, long timeoutMs) {
+        if (index < 1) {
+            throw new IllegalArgumentException("index must be positive");
+        }
+        CompletableFuture<ApplyResult<?>> future;
+        synchronized (nodeLock) {
+            ApplyResult<?> ready = appliedResults.get(index);
+            if (ready != null) {
+                return ready;
+            }
+            future = new CompletableFuture<>();
+            pendingApplies.put(index, future);
+        }
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            cancelAwait(index, future);
+            throw new ApplyTimeoutException("apply timeout index=" + index, e);
+        } catch (InterruptedException e) {
+            cancelAwait(index, future);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("apply interrupted index=" + index, e);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("apply failed index=" + index, e.getCause());
+        }
+    }
+
+    /** Снимает регистрацию ожидающего запроса (для отмены по таймауту). */
+    public void cancelAwait(long index) {
+        synchronized (nodeLock) {
+            pendingApplies.remove(index);
+        }
+    }
+
+    private void cancelAwait(long index, CompletableFuture<?> future) {
+        synchronized (nodeLock) {
+            pendingApplies.remove(index, future);
         }
     }
 
@@ -357,6 +410,10 @@ public class RaftNode {
             if (command instanceof UserCommand user) {
                 ApplyResult<?> result = stateMachine.apply(next, user.payload());
                 appliedResults.put(next, result);
+                CompletableFuture<ApplyResult<?>> pending = pendingApplies.remove(next);
+                if (pending != null) {
+                    pending.complete(result);
+                }
                 log.info("entry applied index={} lastApplied={}", next, next);
             } else {
                 // NoOpCommand: Raft-маркер, state machine не вызывается.

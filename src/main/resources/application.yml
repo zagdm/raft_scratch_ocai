@@ -13,6 +13,8 @@ raft:
   election-timeout-max-ms: 700
   heartbeat-interval-ms: 100
   storage-path: data/raft-state.json
+  client:
+    apply-timeout-ms: 5000
 
 cluster:
   peers: []

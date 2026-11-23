@@ -34,4 +34,9 @@ public class KvStateMachine implements StateMachine<JsonNode> {
     public JsonNode get(String key) {
         return kv.get(key);
     }
+
+    /** Отличает отсутствующий ключ от ключа со значением JSON {@code null}. */
+    public boolean contains(String key) {
+        return kv.containsKey(key);
+    }
 }

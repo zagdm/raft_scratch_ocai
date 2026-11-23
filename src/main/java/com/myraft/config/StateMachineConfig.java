@@ -1,6 +1,5 @@
 package com.myraft.config;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.myraft.raft.fsm.StateMachine;
 import com.myraft.raft.fsm.kv.KvCommandsModule;
 import com.myraft.raft.fsm.kv.KvStateMachine;
@@ -19,8 +18,9 @@ public class StateMachineConfig {
         return new KvCommandsModule();
     }
 
+    /** Конкретный тип нужен API-адаптеру для чтения KV; для ядра это по-прежнему {@link StateMachine}. */
     @Bean
-    public StateMachine<JsonNode> stateMachine() {
+    public KvStateMachine stateMachine() {
         return new KvStateMachine();
     }
 }
